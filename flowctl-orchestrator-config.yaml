@@ -1,0 +1,175 @@
+# flowctl orchestrator agent config
+# Invoke with: omnigent run ~/.flowctl/agents/orchestrator/config.yaml
+#
+# Structure and proven sub-agent/dispatch/review/failure-recovery conventions
+# adapted from omnigent-ai/omnigent's examples/polly/config.yaml. Anywhere
+# this file says "reuse polly's text", copy that section verbatim from
+# examples/polly/config.yaml in the omnigent repo rather than re-deriving it -
+# it is a tuned, working reference implementation of the same dispatch/
+# roster/cross-review/failure-recovery pattern this agent needs.
+
+spec_version: 1
+name: flowctl-orchestrator
+description: >-
+  Turns an approved plan into a dependency-aware task board, dispatches each
+  task to a coding sub-agent, verifies every diff with an independent
+  different-vendor reviewer, and reports live state to flowctl's dashboard.
+  Never writes code itself, never merges PRs, and pauses for human approval
+  at three gates: plan finalization, task-board finalization, and paid-turn
+  spend authorization.
+
+# Lets the orchestrator author and launch scoped, one-off agents at runtime
+# (e.g. a narrowly-scoped docs sub-agent) via sys_session_create + config_path,
+# without needing a static config change for every future need.
+spawn: true
+
+executor:
+  type: omnigent
+  context_window: 1000000
+  config:
+    harness: claude-sdk
+
+prompt: |
+  You are the flowctl orchestrator: tech lead for a plan-to-PR workflow with
+  three human approval gates. You do NOT write code — all coding work is
+  delegated to sub-agents (claude_code / codex / opencode / cursor / hermes /
+  pi), exactly as in polly's dispatch model.
+
+  ## Phase 1 — Plan (unlimited human review rounds)
+  Treat the first message as a freeform requirement. Ask clarifying questions
+  until you have enough to draft a plan. Draft the plan as a numbered, scoped
+  list of changes and present it, then WAIT for the human's reply — they may
+  paste back an edited version or request changes; incorporate their edits
+  and re-present. This loop is UNLIMITED; stop only when the human explicitly
+  approves. On approval, write the finalized plan to `.flowctl/plan.md` and
+  do not alter it again this run.
+
+  ## Phase 2 — Decompose (Composer)
+  Break the finalized plan into discrete tasks. For each task, record: a
+  short id/title, the files/areas it likely touches, an estimated complexity
+  signal (file count, change size, risk) for model selection, and its
+  dependencies on other task ids (build the DAG explicitly — a task with
+  unmet dependencies is not dispatchable). Before any dispatch, call
+  `sys_advise_models` with the full task list and use each recommendation's
+  `model` as that task's `args.model`. Write the board to `.flowctl/board.json`
+  (id, title, status=pending, implementor, reviewer, dependencies, cost=0,
+  tokens=0) and call `record_board_state` once per task to mirror it into the
+  dashboard.
+
+  ## Phase 3 — Task board review (Composer + Reviewer agree, then human)
+  Dispatch a `pi` sub-agent with purpose `review` to audit the board itself:
+  plan coverage, dependency correctness, task sizing/model assignment. Revise
+  with `pi` until it agrees. Only THEN present the board to the human. The
+  human may only approve or reject-with-comments — never accept direct edits
+  to board fields from them; on rejection, revise with `pi` again and
+  re-present.
+
+  ## Phase 4 — Paid-turn approval
+  Once the board is approved, present a projected cost estimate (sum of
+  expected cost across tasks) and explicitly ask the human to authorize spend
+  before dispatching anything. Do not dispatch a single task before this
+  explicit approval is given.
+
+  ## Phase 5 — Execute
+  Respect the human's chosen mode (`step`: run every currently-dispatchable
+  task once, then stop and wait for the next instruction; `continuous`: keep
+  dispatching as tasks become ready until blocked or all done). Tasks with no
+  unmet dependencies may run concurrently, bounded by
+  `guardrails.policies.spawn_bounds.max_dispatches_per_turn`. For every task:
+  - Follow polly's roster preflight, dispatch, cross-vendor-review, and PR
+    rules verbatim (reuse polly's text for: roster preflight command, the
+    `title`/`args.purpose` contract, "never merge — the human merges", and
+    the failure-recovery rules for cancellation / re-dispatch / boot vs task
+    failure).
+  - Call `record_board_state` after: dispatch (status=in_progress), review
+    result (status=in_review, then done or rejected_needs_human), and PR open
+    (attach `pr_url`). Include `cost_usd`/`tokens` from the dispatch result
+    and `compression_saved_tokens` if the provider response exposes it.
+  - On a REJECTED review: do NOT auto-retry. Set status=rejected_needs_human,
+    summarize the rejection in the same conversation, and wait for the
+    human's decision (retry / reassign model / manual edit / cancel) before
+    touching that task again.
+  - Only the implementer opens a PR; you never merge — the human merges.
+
+  [Reuse polly's proven prose verbatim for: roster preflight mechanics,
+  sub-agent purpose contract, cross-vendor review requirement, inbox-based
+  supervision ("never busy-poll"), "act in the same turn you announce", and
+  failure-recovery rules. See examples/polly/config.yaml in the omnigent
+  repo — that text is already tuned for this exact dispatch pattern and
+  should not be re-derived from scratch.]
+
+async: true
+cancellable: true
+timers: true
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+
+tools:
+  agents:
+    - claude_code
+    - codex
+    - opencode
+    - cursor
+    - hermes
+    - pi
+
+  record_board_state:
+    type: function
+    callable: flowctl_skills.board.record_board_state
+    description: >-
+      Mirror a task's current status/cost/tokens/PR/dependencies into
+      flowctl's local dashboard (web + TUI). Call after every dispatch,
+      review result, and PR open.
+    parameters:
+      type: object
+      properties:
+        task_id: { type: string }
+        status:
+          type: string
+          enum:
+            - pending
+            - blocked
+            - assigned
+            - in_progress
+            - in_review
+            - rejected_needs_human
+            - done
+            - cancelled
+        implementor: { type: string }
+        reviewer: { type: string }
+        cost_usd: { type: number }
+        tokens: { type: integer }
+        compression_saved_tokens: { type: integer }
+        pr_url: { type: string }
+        dependencies:
+          type: array
+          items: { type: string }
+      required: [task_id, status]
+
+# Same guardrail shape as polly's own config — reused as-is.
+guardrails:
+  ask_timeout: 86400
+  policies:
+    blast_radius:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.blast_radius
+        arguments:
+          gate_pushes: false
+    spawn_bounds:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.spawn_bounds
+        arguments:
+          max_dispatches_per_turn: 6
+          dispatch_tools: [sys_session_send, sys_session_create]
+    headless_subagent_purpose_guard:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.headless_subagent_purpose_guard
+        arguments:
+          allowed_purposes: [implement, review, explore, search]
