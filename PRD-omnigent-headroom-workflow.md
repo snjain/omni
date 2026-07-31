@@ -121,16 +121,20 @@ The public homepages undersell both products' actual reach — the real repos li
 
 **GitHub Copilot is not supported by either product** — no combination of Omnigent+Headroom covers it. If Copilot support is a hard requirement, that's a gap neither vendor closes.
 
-### 9.2 Headroom ↔ Omnigent wiring (resolved)
+### 9.2 Headroom ↔ Omnigent wiring (resolved, with a correction)
 
 Neither product's docs mention the other by name, but the mechanism to connect them is real and documented on each side independently:
 
 - **Omnigent's Gateway** accepts "any OpenAI- or Anthropic-compatible `base_url` and key" (examples given: OpenRouter, Ollama). Configured via `omnigent setup`.
 - **Headroom's proxy mode** (`headroom proxy --port 8787`) serves both Anthropic `/v1/messages` and OpenAI-compatible `/v1/chat/completions`/`/v1/responses` routes locally, compressing transparently before forwarding to the real provider.
 
-**Wiring**: point Omnigent's Gateway `base_url` at `http://localhost:8787` (Headroom's proxy). Every model call Omnigent routes gets compressed before reaching the real provider.
+**Wiring**: point Omnigent's `base_url` override(s) at `http://localhost:8787` (Headroom's proxy). Every model call routed through it gets compressed before reaching the real provider.
+
+**Correction — this is likely not one unified knob.** Earlier drafts of this PRD described a single "Gateway `base_url`" setting. Searching Omnigent's source shows separate, narrower overrides instead: general provider vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) plus per-harness gateway vars (`HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`, and presumably others per harness). Whether `omnigent setup` unifies these into one config entry for you, or you'd need to set several independently, is **not yet confirmed** — flag as a §16 item: enumerate the full set of base_url-style knobs before implementation.
 
 **Unverified assumption (needs a PoC before relying on it, see §16)**: whether Omnigent's Gateway sits in the request path for *every* harness session (Claude Code, Cursor, OpenCode, etc.) or only for Omnigent's own built-in/custom agents. If it's the latter, only the orchestrator's own "brain" calls get compressed, not the sub-agent harnesses' calls.
+
+**Design decision — flowctl presents one global switch regardless.** Even though the underlying knobs may be per-provider/per-harness, flowctl deliberately does not expose that granularity to the user. `flowctl compression on` / `flowctl compression off` sets or unsets *every* known base_url override together, so compression is a single on/off decision from the user's point of view — see §13. The risk this creates: if a new harness's gateway var isn't in flowctl's known list, toggling "off" could leave that one harness still routed through Headroom, silently breaking the "global switch" promise. §16 needs an explicit, versioned list of every override flowctl must touch, kept in sync as Omnigent adds harnesses.
 
 ### 9.3 Distribution & licensing
 
@@ -284,7 +288,18 @@ Day-to-day, the actual plan/board/execution interaction happens **inside the int
 flowctl start        # shorthand for: omnigent run ~/.flowctl/agents/orchestrator/config.yaml
 flowctl board         # opens the dashboard — TUI by default (terminal-native, matches
                         # Omnigent's own posture); `--web` opens the browser version instead
+
+flowctl compression off   # unsets every known base_url override (ANTHROPIC_BASE_URL,
+                            # OPENAI_BASE_URL, HARNESS_PI_GATEWAY_BASE_URL, etc. — see §9.2)
+                            # so both plain `omnigent` and flowctl talk to the real
+                            # provider directly. One switch, regardless of how many
+                            # underlying knobs exist.
+flowctl compression on    # re-applies them, pointed at the Headroom proxy
+flowctl compression status   # reports which known overrides are currently set vs. unset —
+                               # surfaces drift instead of silently trusting the last toggle
 ```
+
+**Deliberately a single global switch, not per-harness controls** — flowctl always sets/unsets the full known list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in flowctl's known list yet and gets missed by a toggle.
 
 ## 14. Dashboard: Web + TUI
 
@@ -296,6 +311,7 @@ Sourced by the orchestrator from each sub-agent dispatch's result and included i
 
 ## 16. Remaining Unverified Assumptions — Do These Before Committing Further
 
-1. **Gateway request-path scope** (§9.2): confirm Omnigent's Gateway actually intercepts *every* harness's model calls, not just the orchestrator's own. Test: point the Gateway at a dummy logging server, dispatch a Cursor- or Claude-Code-orchestrated sub-agent task, confirm the dummy server sees it.
+1. **Gateway request-path scope** (§9.2): confirm Omnigent's Gateway/base_url overrides actually intercept *every* harness's model calls, not just the orchestrator's own. Test: point the override(s) at a dummy logging server, dispatch a Cursor- or Claude-Code-orchestrated sub-agent task, confirm the dummy server sees it.
 2. **`omnigent setup`'s config format**: inspect what it actually writes (e.g. `~/.omnigent/...`) so the installer can pre-populate/patch it programmatically rather than requiring interactive input.
-3. **Cost/token/compression-saving surfacing**: confirm what Omnigent's dispatch results (or Headroom's own stats endpoint) actually expose per-call, since `record_board_state`'s `cost_usd`/`tokens`/`compression_saved_tokens` fields depend on this being real, retrievable data.
+3. **Full enumeration of base_url-style overrides** (§9.2): confirmed so far — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`. Unconfirmed — whether every other harness (Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity) has its own equivalent, and whether `omnigent setup` exposes one unified entry point for all of them or each must be set independently. This list is exactly what `flowctl compression on/off` needs to stay complete and correct — treat it as a living list, re-verified whenever Omnigent adds a harness.
+4. **Cost/token/compression-saving surfacing**: confirm what Omnigent's dispatch results (or Headroom's own stats endpoint) actually expose per-call, since `record_board_state`'s `cost_usd`/`tokens`/`compression_saved_tokens` fields depend on this being real, retrievable data.
