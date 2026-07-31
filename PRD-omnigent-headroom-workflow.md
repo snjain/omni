@@ -172,10 +172,10 @@ Confirmed directly in `omnigent-ai/omnigent`'s source (`docs/omni-upgrade-design
 - The schema is Alembic-migration-managed by Omnigent's own release process (`omnigent/db/migrations/versions/...`); an externally-added table would sit outside that history, with no compatibility guarantee across Omnigent upgrades, and risks lock contention with Omnigent's own server process as a second uncoordinated writer.
 
 **Decision: each module maintains its own separate SQLite database under the platform's data directory**, fully owned and schema-controlled by that module, independent of Omnigent's release cycle. polly-pipe's board lives at `~/.icemetaagents/modules/polly-pipe/board.db`:
-- Only the platform's local API server (`:7878`, see §11) reads/writes `board.db` directly — `record_board_state` never touches the file itself, it POSTs to that API, keeping DB access single-writer.
-- The web/TUI dashboards read from the same API server, not the file directly — one source of truth for board-specific data.
-- Optional, read-only correlation: the API server may separately open `~/.omnigent/chat.db` **read-only** to pull session/conversation metadata by `session_id`/`conversation_id` for display alongside a task — never as a write target.
-- A future module gets its own `~/.icemetaagents/modules/<name>/*.db`, namespaced the same way — no shared schema to coordinate across modules.
+- **No standing server sits in front of it.** `record_board_state` (running inside the orchestrator's own process) writes directly to `board.db` — it's the sole writer, so there's no concurrent-write hazard to design around. This replaced an earlier draft of this PRD that routed writes through a persistent local API server; that hop added a process and a port for no benefit once the single-writer property was recognized (see §11/§13.2/§14 for the revised, server-light design).
+- Dashboards **read** the same file — the TUI opens it read-only and polls (task state doesn't change sub-second, so polling is sufficient — no push infrastructure needed); the web dashboard, when used, is served by an on-demand process rather than a persistent one (§14).
+- Optional, read-only correlation: a dashboard reader may separately open `~/.omnigent/chat.db` **read-only** to pull session/conversation metadata by `session_id`/`conversation_id` for display alongside a task — never as a write target.
+- A future module gets its own `~/.icemetaagents/modules/<name>/*.db`, namespaced the same way — no shared schema to coordinate across modules, and no shared server to keep running either.
 
 ## 10. Omnigent Extensibility Model
 
@@ -206,7 +206,9 @@ This is distinct from adding a whole new **module** (§11.1), which is a platfor
 
 ## 11. Final Architecture — Platform / Module Split
 
-All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, cross-model review, PR creation, all three approval gates) lives **inside Omnigent** as polly-pipe's custom agent, invoked purely via `omnigent run`. icemetaagents is deliberately thin at the platform level too — it exists to do once, for every module, the things Omnigent structurally cannot host itself: installation/wiring, a global compression switch, and a live structured dashboard (Omnigent's UI has no extension point, confirmed in §10).
+All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, cross-model review, PR creation, all three approval gates) lives **inside Omnigent** as polly-pipe's custom agent, invoked purely via `omnigent run`. icemetaagents is deliberately thin at the platform level too — it exists to do once, for every module, the things Omnigent structurally cannot host itself: installation/wiring and a global compression switch. It does **not** run a persistent dashboard server (see the revision note below) — dashboards read module state directly.
+
+**Revision — dropped the persistent local API/state server.** An earlier draft of this architecture put a standing HTTP server (`:7878`) between `record_board_state` and each module's SQLite file, to support live-push updates to the dashboard. On review this added a process and a port for no real benefit: `record_board_state` is the *sole* writer to its module's database (no concurrent-write hazard to mediate), and task-board state doesn't change fast enough to need push updates — polling a SQLite file every second or two is indistinguishable in practice. The server is gone; see §13.2/§14 for the resulting design.
 
 ```
                          ┌─────────────────────────────────────────┐
@@ -214,26 +216,27 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
                          │  talks to orchestrator · watches board    │
                          └───────────┬───────────────┬───────────────┘
                                      │               │
-                     interactive session          reads/watches
+                     interactive session          reads/polls
                      (plan review, board                │
                       approval, paid-turn,               ▼
                       rejection escalation)     ┌──────────────────────┐
-                                     │           │  icemetaagents         │
-                                     ▼           │  dashboard              │
-                    ┌────────────────────────┐   │  (web + TUI renderers, │
-                    │   omnigent run          │   │   shared across        │
-                    │   polly-pipe's           │   │   modules)             │
-                    │   orchestrator/config.yaml│   └──────────┬────────────┘
-                    │   (custom agent, forked  │              │ SSE/WebSocket
-                    │    from Polly's pattern) │   ┌──────────▼────────────┐
-                    │                          │──▶│  icemetaagents local   │
-                    │  record_board_state()    │   │  API / state framework  │
-                    │  called after every       │   │  (localhost:7878)       │
-                    │  dispatch/review/PR/cost   │   │  routes to each         │
-                    └───────────┬────────────────┘   │  module's own SQLite    │
-                                │ dispatches sub-agents│  e.g. polly-pipe's      │
-                                │ into parallel worktrees│ ~/.icemetaagents/      │
-                                ▼                       │ modules/polly-pipe/    │
+                                     │           │  polly-pipe dashboard  │
+                                     ▼           │  TUI: reads board.db    │
+                    ┌────────────────────────┐   │  directly, read-only,   │
+                    │   omnigent run          │   │  polls every ~1-2s      │
+                    │   polly-pipe's           │   │  Web (--web): on-demand │
+                    │   orchestrator/config.yaml│   │  local process, same    │
+                    │   (custom agent, forked  │   │  read-only queries,      │
+                    │    from Polly's pattern) │   │  exits when closed       │
+                    │                          │   └──────────┬────────────┘
+                    │  record_board_state()    │              │ read-only,
+                    │  writes directly to       │              │ no push
+                    │  ~/.icemetaagents/modules/│              │
+                    │  polly-pipe/board.db      │◀─────────────┘
+                    └───────────┬────────────────┘
+                                │ dispatches sub-agents
+                                │ into parallel worktrees
+                                ▼
         ┌───────────────────────────────────────────────────────┐
         │   HARNESSES (implementor / reviewer sub-agents)          │
         │   Claude Code · Codex · Cursor · OpenCode · Pi · Hermes    │
@@ -265,17 +268,17 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
         (one per task; humans merge, agents never do).
 ```
 
+**Standing ports, revised**: just two run persistently regardless of what we build — Headroom's proxy (`:8787`) and Omnigent's own web UI (`:6767`, which runs whether or not any module uses it). polly-pipe's web dashboard uses a port only transiently, while `--web` is open; the TUI uses none.
+
 | Component | What it is | Layer | Built by this project? |
 |---|---|---|---|
 | Headroom | Third-party pip package, proxy on :8787 | — | No |
-| Omnigent | Third-party meta-harness | — | No |
+| Omnigent | Third-party meta-harness, own web UI on :6767 | — | No |
 | Harnesses (Claude Code, Codex, Cursor, OpenCode, Pi, Hermes) | Third-party coding agents | — | No |
 | Installer/setup, compression toggle | Installs Headroom + Omnigent once, wires base_url overrides, `compression on/off/status` | **icemetaagents (platform)** | **Yes** |
-| Local API / state framework | Server on :7878; routes each module's state to its own SQLite (§9.4) | **icemetaagents (platform)** | **Yes** |
-| Dashboard (web + TUI) | Shared render layers; modules register their own views/columns into it | **icemetaagents (platform)** | **Yes** |
 | Module registry | `icemetaagents module add/list/remove` | **icemetaagents (platform)** | **Yes** |
-| Orchestrator agent (`config.yaml` + skills) | polly-pipe's custom Omnigent agent, forked from `examples/polly` | **polly-pipe (module)** | **Yes** — see `polly-pipe/orchestrator-config.yaml` in this repo |
-| Task board schema + view (§6) | polly-pipe's own columns, registered into the shared dashboard | **polly-pipe (module)** | **Yes** |
+| Orchestrator agent (`config.yaml` + skills) | polly-pipe's custom Omnigent agent, forked from `examples/polly`; `record_board_state` writes `board.db` directly | **polly-pipe (module)** | **Yes** — see `polly-pipe/orchestrator-config.yaml` in this repo |
+| Dashboard (TUI always available; web on-demand) | Reads `board.db` directly, read-only, polling — no server in the write path, and no server at all for the TUI | **polly-pipe (module)** | **Yes** |
 | GitHub | External | — | No |
 
 ### 11.1 Module contract — what a future module needs to provide
@@ -285,8 +288,7 @@ This is new, unspecified surface (§7 flags it as an open question) — captured
 **icemetaagents (platform) guarantees to every module:**
 - Omnigent and Headroom already installed and wired (§9.2) by the time a module runs.
 - A global compression toggle the module doesn't need to reimplement.
-- A running local API/dashboard server the module can register state and a view into.
-- Isolated storage under `~/.icemetaagents/modules/<module-name>/`.
+- Isolated storage under `~/.icemetaagents/modules/<module-name>/` — no server required to use it; a module writes directly to its own SQLite file.
 
 **A module must provide, to be registered via `icemetaagents module add <name>`:**
 - An Omnigent-invocable agent directory (`config.yaml` + optional `skills/*/SKILL.md`), same shape as polly-pipe's.
@@ -297,7 +299,7 @@ This is new, unspecified surface (§7 flags it as an open question) — captured
 ## 12. Implementation Files (in this repo)
 
 - **`polly-pipe/orchestrator-config.yaml`** *(renamed from `flowctl-orchestrator-config.yaml`)* — polly-pipe's orchestrator agent template: five-phase prompt (plan → decompose → board review → paid-turn → execute), `spawn: true` for dynamic sub-agents, `record_board_state` function-tool wiring, guardrails (`blast_radius`, `spawn_bounds`, `headless_subagent_purpose_guard`) reused from Omnigent's own reference orchestrator. Placeholders marked `[Reuse polly's proven prose verbatim for: ...]` should be filled by copying the matching sections from `examples/polly/config.yaml` in the `omnigent-ai/omnigent` repo rather than re-deriving them.
-- **`polly_pipe/skills/board.py`** *(renamed from `flowctl_skills/board.py`)* — the one real Python function tool (`record_board_state`), posting task state to icemetaagents' local API. This is the only custom code referenced from the orchestrator's `tools:` block; everything else in the YAML is prose.
+- **`polly_pipe/skills/board.py`** *(renamed from `flowctl_skills/board.py`)* — the one real Python function tool (`record_board_state`), writing task state directly to `board.db` (no API hop — see §11's revision note). This is the only custom code referenced from the orchestrator's `tools:` block; everything else in the YAML is prose.
 - Sub-agent configs (`claude_code`, `codex`, `opencode`, `cursor`, `hermes`, `pi`) need **no changes** from Omnigent's own `examples/polly/agents/<name>/config.yaml` — board reporting is orchestrator-side only, and lives with polly-pipe, not with any other module.
 
 ## 13. Installation & CLI UX
@@ -310,7 +312,7 @@ curl -fsSL https://icemetaagents.dev/install.sh | sh   # pip-installs headroom-a
 
 icemetaagents setup      # collects provider/GitHub keys, spend caps, concurrency limit;
                            # starts Headroom proxy; wires Omnigent's base_url overrides
-                           # to it; starts the shared local API/dashboard server
+                           # to it — no dashboard server to start, there isn't one (§11)
 
 icemetaagents doctor      # fires a dummy session through Omnigent and confirms Headroom's
                            # proxy actually saw and compressed the traffic — the built-in
@@ -319,8 +321,8 @@ icemetaagents doctor      # fires a dummy session through Omnigent and confirms 
 icemetaagents compression on | off | status   # global switch, shared across every
                                                 # installed module — see §9.2
 
-icemetaagents module add polly-pipe    # registers a module (installs its agent + skills
-                                         # + dashboard view, per the §11.1 contract)
+icemetaagents module add polly-pipe    # registers a module (installs its agent + skills,
+                                         # per the §11.1 contract)
 icemetaagents module list
 icemetaagents module remove polly-pipe
 ```
@@ -333,17 +335,24 @@ Day-to-day, the actual plan/board/execution interaction happens **inside the int
 
 ```bash
 polly-pipe start   # shorthand for: omnigent run ~/.icemetaagents/modules/polly-pipe/agents/orchestrator/config.yaml
-polly-pipe board    # opens polly-pipe's view within the shared icemetaagents dashboard —
-                      # TUI by default (terminal-native, matches Omnigent's own posture);
-                      # `--web` opens the browser version instead
+polly-pipe board    # TUI by default: opens board.db read-only, polls every ~1-2s,
+                      # no server process involved
+polly-pipe board --web   # spins up a minimal, stateless, read-only HTTP process on
+                           # demand (queries board.db per request, no in-memory state
+                           # to keep in sync) and opens a browser tab against it; the
+                           # process exits when the tab/command closes — nothing keeps
+                           # running in the background afterward
 
 # equivalently, via the platform once the module is registered:
 icemetaagents run polly-pipe
 ```
 
-## 14. Dashboard: Web + TUI
+## 14. Dashboard: TUI (default) + On-Demand Web
 
-Both are thin render layers on the shared icemetaagents state API (§11) — no duplicated bridge logic, and no per-module server to stand up. Recommended library for the TUI: **Textual** (Python, matches the rest of the stack, handles live-updating multi-column tables well). Tradeoff to keep in mind: Omnigent's own selling point is session continuity across terminal → browser → phone; a TUI-first board doesn't carry over to mobile the way the web version does, so the web dashboard is the one that has to exist if "check the board from my phone" matters — TUI is additive, not a replacement.
+Revised from an earlier draft that had both as render layers on a persistent shared state-API server — that server added a process and a port with no real benefit once `record_board_state` was recognized as the sole writer to `board.db` (see §11's revision note). The current design:
+
+- **TUI (default, no server at all)**: a local process (recommended: **Textual**, Python, matches the rest of the stack) opens `~/.icemetaagents/modules/polly-pipe/board.db` read-only and polls it every ~1-2 seconds. Task-board state doesn't change fast enough to need push updates, so polling is indistinguishable from push in practice, without the complexity.
+- **Web (`--web`, on-demand only)**: since a browser can't open a local SQLite file directly, a minimal HTTP process is required here — but it's stateless (queries `board.db` per request, holds nothing in memory) and only runs while explicitly requested, not as a background service. Tradeoff to keep in mind: Omnigent's own selling point is session continuity across terminal → browser → phone; "check the board from my phone" only works while the on-demand web process happens to be running — if that matters as an always-available capability rather than an occasional one, it would need to become a persistent service again, reintroducing the port/process this revision removed.
 
 ## 15. Cost/Token/Compression Reporting
 
@@ -356,3 +365,4 @@ Sourced by polly-pipe's orchestrator from each sub-agent dispatch's result and i
 3. **Full enumeration of base_url-style overrides** (§9.2): confirmed so far — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`. Unconfirmed — whether every other harness (Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity) has its own equivalent, and whether `omnigent setup` exposes one unified entry point for all of them or each must be set independently. This list is exactly what `icemetaagents compression on/off` needs to stay complete and correct — treat it as a living list, re-verified whenever Omnigent adds a harness.
 4. **Cost/token/compression-saving surfacing**: confirm what Omnigent's dispatch results (or Headroom's own stats endpoint) actually expose per-call, since `record_board_state`'s `cost_usd`/`tokens`/`compression_saved_tokens` fields depend on this being real, retrievable data.
 5. **Module contract (§11.1)**: this is a first draft, designed against polly-pipe as the only real example. It should be revisited once a second module is actually attempted — a one-module sample isn't enough to know which parts of the contract are genuinely general-purpose versus accidentally polly-pipe-shaped.
+6. **SQLite concurrent read/write behavior** (§11, §14): confirm `board.db` is opened in WAL mode so the TUI/web dashboard's read-only polling doesn't hit "database is locked" against `record_board_state`'s writes. This is standard SQLite practice for a single-writer/multi-reader setup, but needs to actually be set when the DB is created, not assumed.

@@ -4,14 +4,40 @@
 # import (mirrors how omnigent's own guardrails reference
 # omnigent.inner.nessie.policies.blast_radius).
 #
-# Posts to icemetaagents' shared local API/dashboard server, not a
-# polly-pipe-owned server - the platform routes this module's state to its
-# own SQLite store at ~/.icemetaagents/modules/polly-pipe/board.db.
+# Writes directly to this module's own SQLite database - no local API/state
+# server sits in front of it. record_board_state is the sole writer, so
+# there's no concurrent-write hazard to mediate; the TUI/web dashboard open
+# the same file read-only and poll it (see PRD §11, §14). WAL mode is set on
+# first connection so those readers don't block on this writer (PRD §16).
 
-import httpx
+import json
+import sqlite3
+from pathlib import Path
 
-ICEMETAAGENTS_API = "http://localhost:7878"
-MODULE = "polly-pipe"
+DB_PATH = Path.home() / ".icemetaagents" / "modules" / "polly-pipe" / "board.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    implementor TEXT,
+    reviewer TEXT,
+    cost_usd REAL,
+    tokens INTEGER,
+    compression_saved_tokens INTEGER,
+    pr_url TEXT,
+    dependencies TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def _connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(_SCHEMA)
+    return conn
 
 
 def record_board_state(
@@ -25,11 +51,34 @@ def record_board_state(
     pr_url: str | None = None,
     dependencies: list[str] | None = None,
 ) -> dict:
-    payload = {k: v for k, v in locals().items() if v is not None}
-    resp = httpx.post(
-        f"{ICEMETAAGENTS_API}/api/modules/{MODULE}/tasks/{task_id}",
-        json=payload,
-        timeout=5,
-    )
-    resp.raise_for_status()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tasks (task_id, status, implementor, reviewer, cost_usd,
+                                tokens, compression_saved_tokens, pr_url, dependencies,
+                                updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(task_id) DO UPDATE SET
+                status = excluded.status,
+                implementor = COALESCE(excluded.implementor, implementor),
+                reviewer = COALESCE(excluded.reviewer, reviewer),
+                cost_usd = COALESCE(excluded.cost_usd, cost_usd),
+                tokens = COALESCE(excluded.tokens, tokens),
+                compression_saved_tokens = COALESCE(excluded.compression_saved_tokens, compression_saved_tokens),
+                pr_url = COALESCE(excluded.pr_url, pr_url),
+                dependencies = COALESCE(excluded.dependencies, dependencies),
+                updated_at = datetime('now')
+            """,
+            (
+                task_id,
+                status,
+                implementor,
+                reviewer,
+                cost_usd,
+                tokens,
+                compression_saved_tokens,
+                pr_url,
+                json.dumps(dependencies) if dependencies is not None else None,
+            ),
+        )
     return {"ok": True}
