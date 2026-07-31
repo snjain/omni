@@ -1,6 +1,12 @@
 # polly-pipe orchestrator agent config (a module on the iceagentkit platform)
-# Invoke with: omnigent run ~/.iceagentkit/modules/polly-pipe/agents/orchestrator/config.yaml
+# Invoke with: omnigent run <iceagentkit data dir>/modules/polly-pipe/agents/orchestrator/config.yaml
 # (or the shorthand: polly-pipe start / iceagentkit run polly-pipe)
+# "<iceagentkit data dir>" is $XDG_DATA_HOME/iceagentkit (default
+# ~/.local/share/iceagentkit) on Linux/macOS, or %LOCALAPPDATA%\iceagentkit\data
+# on Windows - see PRD §11.3. On native (non-WSL) Windows, note PRD §11.4:
+# Omnigent's own native terminal-wrapped harness dispatch - the mechanism this
+# orchestrator depends on for every sub-agent - isn't available; use Linux,
+# macOS, or WSL.
 #
 # Structure and proven sub-agent/dispatch/review/failure-recovery conventions
 # adapted from omnigent-ai/omnigent's examples/polly/config.yaml. Anywhere

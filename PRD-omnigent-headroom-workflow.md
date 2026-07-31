@@ -356,16 +356,27 @@ iceagentkit module add polly-pipe
     and adds the rtk-prefix instruction to the orchestrator's prompt)
 ```
 
-### 11.3 Package/Config Layout — where everything actually lives
+### 11.3 Package/Config Layout — where everything actually lives (cross-platform)
 
 Same principle already established for `chat.db` (§9.4): **iceagentkit does not duplicate or re-host any vendor tool's own config or data.** It owns exactly three things — secrets (written into each tool's own expected mechanism, not a new store), a thin capabilities manifest (so `status` commands read one file instead of re-probing four different vendor tools each time), and module storage. Everything else stays wherever the vendor tool already puts it.
 
-**`~/.iceagentkit/` — what the platform owns:**
+**Not macOS/Unix-only — resolved per-OS, consistent with how Omnigent itself already behaves.** Omnigent's own source honors `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME` extensively (confirmed in `install_ledger.py`, `update_check.py`, and several onboarding modules for goose/opencode auth), falling back to `~/.config`/`~/.local/share`/`~/.cache`/`~/.local/state` when unset — on *any* OS, not just Linux (i.e. it doesn't switch to Apple's `~/Library/Application Support` convention on macOS). iceagentkit follows the identical pattern for consistency with the tool it's orchestrating, and adds the Windows equivalent, implemented via a standard path-resolution library (e.g. Python's `platformdirs`) rather than hardcoded `~/...` paths:
+
+| | Config (`env`, `config.toml`, `capabilities.json`) | Data (`modules/`, `logs/`) |
+|---|---|---|
+| **Linux / macOS** | `$XDG_CONFIG_HOME/iceagentkit` (default `~/.config/iceagentkit`) | `$XDG_DATA_HOME/iceagentkit` (default `~/.local/share/iceagentkit`) |
+| **Windows** | `%LOCALAPPDATA%\iceagentkit\config` | `%LOCALAPPDATA%\iceagentkit\data` |
+
+Every `~/.iceagentkit/...` path shown elsewhere in this PRD (§11 diagram, §13 CLI examples, `board.py`) is shorthand for this resolution — not a literal hardcoded path. `polly_pipe/skills/board.py`'s `DB_PATH` should be updated from `Path.home() / ".iceagentkit" / ...` to a `platformdirs`-resolved path before this is real code, not just a design placeholder.
+
+**What iceagentkit owns, structurally (same shape regardless of OS):**
 ```
-~/.iceagentkit/
+<data dir>/
 ├── env                        # the ONE file a human edits: ANTHROPIC_API_KEY,
 │                                OPENAI_API_KEY, GITHUB_TOKEN, etc. Written once by
-│                                `iceagentkit setup`, chmod 600. Propagating these into
+│                                `iceagentkit setup`, permissioned as tightly as the
+│                                OS allows (chmod 600 on Linux/macOS; an ACL restricting
+│                                to the current user on Windows). Propagating these into
 │                                each vendor tool's own expected env var/config location
 │                                is iceagentkit's job — a human only ever touches this
 │                                one file, not four different tools' separate configs.
@@ -391,8 +402,11 @@ Same principle already established for `chat.db` (§9.4): **iceagentkit does not
 
 **What stays vendor-owned, untouched (confirmed locations where verified, flagged where not):**
 ```
-~/.omnigent/chat.db          — Omnigent's own (§9.4) — confirmed
-~/.config/rtk/config.toml    — RTK's own, e.g. exclude_commands (§9.6) — confirmed
+~/.omnigent/chat.db          — Omnigent's own stated default (§9.4). Note: this literal
+                                path doesn't itself follow the XDG pattern Omnigent uses
+                                elsewhere in its own codebase (install ledger, update
+                                check, sub-harness auth) — unreconciled, see §16 item 11.
+~/.config/rtk/config.toml    — RTK's own, e.g. exclude_commands (§9.6) — confirmed, already XDG-shaped
 <repo>/graphify-out/graph.json — Graphify's own, PER-REPO not global (§9.5) — confirmed
 Headroom's own proxy/runtime config — location not yet confirmed — §16 item 10
 ```
@@ -405,6 +419,16 @@ Headroom's own proxy/runtime config — location not yet confirmed — §16 item
 | Headroom | pip | `pip install "headroom-ai[all]"` |
 | Graphify | `uv tool install graphifyy` + `graphify install` | invokes both, only if enabled (§11.2) |
 | RTK | Homebrew / cargo / prebuilt binary | invokes the relevant installer, only if enabled (§11.2) |
+
+### 11.4 Platform support — Windows is real but degraded; polly-pipe specifically needs WSL
+
+Checked directly against Omnigent's own README and source (`omnigent/_platform.py`, `omnigent/cli_common.py`'s `reject_native_on_windows`, `omnigent/inner/windows_jobobject_sandbox.py`), not assumed:
+
+- **Native Windows support exists**, but Omnigent's own docs call it explicitly "degraded": `omnigent server`, the web UI, and SDK-based harnesses (`omnigent run <agent.yaml>` with `claude-sdk`/`cursor`/`codex` harnesses) work.
+- **Unavailable on native Windows**: the native *terminal-wrapped* harnesses (`omnigent claude`/`omnigent codex`/`omnigent cursor` tmux/PTY wrappers), and **all sandboxing** — `bwrap` (Linux) / `seatbelt` (macOS) filesystem-and-network isolation plus the L7 egress proxy. Windows only gets Job Object process containment, which "contains the process tree and enforces resource limits but does **not** isolate the filesystem or network" (quoted from Omnigent's own README).
+- **This is load-bearing for polly-pipe specifically**, not a minor detail: Polly's (and therefore polly-pipe's) entire sub-agent dispatch model runs implementors/reviewers as native terminal-wrapped harnesses in parallel git worktrees — exactly the capability that's unavailable in Omnigent's degraded native-Windows mode. Running polly-pipe on native Windows would also mean losing the filesystem/network sandboxing its guardrails (`blast_radius`, etc.) partly depend on for enforcement.
+- **Omnigent's own recommendation, which iceagentkit should surface rather than silently inherit**: use Linux, macOS, or **WSL** on Windows for anything requiring native terminal wrappers or full sandboxing — i.e. for polly-pipe. `iceagentkit doctor` (§13.1) should detect native (non-WSL) Windows and warn explicitly that polly-pipe's dispatch model isn't fully supported there, rather than letting it fail confusingly mid-run.
+- **RTK** already confirms native Windows support (v0.37.2+) plus WSL (§9.6) — no gap there. **Graphify's and Headroom's own Windows support are not yet verified** — flagged as §16 item 12.
 
 **Module source vs. installed copy** — a distinction that matters for how `polly-pipe/orchestrator-config.yaml` in *this* repo relates to what ends up on a user's machine: the file in this repo is the **capability-agnostic source template** (no assumption baked in about whether Graphify/RTK are enabled). `iceagentkit module add polly-pipe` is what turns source into an installed copy at `~/.iceagentkit/modules/polly-pipe/agents/orchestrator/config.yaml` — templating in (or leaving out) the `graph:` MCP tool entry and the RTK prompt instructions based on the §11.2 setup answers, and pip-installing `polly_pipe.skills.board` into the same environment Omnigent's executor runs in. Editing the installed copy directly is expected to be overwritten on the next `module add`/upgrade — real changes belong in the source template.
 
@@ -498,4 +522,6 @@ Sourced by polly-pipe's orchestrator from each sub-agent dispatch's result and i
 7. **Per-module compression control** (§11.2): today compression is platform-global only — confirmed no design exists for "on for this module, off for that one." Whether this is worth building depends on item 3 above: it's only possible at all if the per-harness/per-provider overrides turn out to be independently addressable per session, which isn't yet confirmed.
 8. **Graphify's git-hook refresh mechanism** (`graphify hook install/uninstall/status`): confirmed to exist (separate from the nudge hooks), but not yet verified in practice — whether post-commit/post-checkout rebuilds are fast enough to keep the graph usably fresh during an active session, and whether they fire correctly across the parallel git worktrees polly-pipe's implementors use (the staleness risk flagged when Graphify was first discussed).
 9. **RTK's Bash-only hook limitation on Claude Code** (§9.6): the native hook only rewrites `Bash` tool calls — `Read`/`Grep`/`Glob` bypass it. If polly-pipe wants RTK's savings to actually apply, the orchestrator's prompt needs an explicit instruction to prefer `rtk read`/`rtk grep`/`rtk find` over those built-ins for Claude Code implementors specifically — confirm this instruction is both necessary and sufficient (i.e. that sub-agents reliably follow it) before assuming RTK delivers its claimed reduction in practice.
-10. **Headroom's own config/runtime file location** (§11.3): confirmed for Omnigent (`~/.omnigent/chat.db`), RTK (`~/.config/rtk/config.toml`), and Graphify (per-repo `graph.json`) — not yet confirmed for Headroom itself. Needed before `iceagentkit setup` can correctly propagate `~/.iceagentkit/env` secrets into whatever Headroom actually reads, rather than assuming it only needs the proxy's own CLI flags.
+10. **Headroom's own config/runtime file location** (§11.3): confirmed for Omnigent (`~/.omnigent/chat.db`), RTK (`~/.config/rtk/config.toml`), and Graphify (per-repo `graph.json`) — not yet confirmed for Headroom itself. Needed before `iceagentkit setup` can correctly propagate the iceagentkit `env` file's secrets into whatever Headroom actually reads, rather than assuming it only needs the proxy's own CLI flags.
+11. **`chat.db`'s path vs. Omnigent's own XDG convention** (§11.3): Omnigent's source honors `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME` extensively elsewhere (install ledger, update check, sub-harness auth), but the design doc's stated default for `chat.db` is the plain `~/.omnigent/chat.db`, which doesn't fit that pattern. Confirm whether this is intentional (a fixed path regardless of XDG env vars) or whether `chat.db`'s real location also resolves via XDG somewhere not yet found, before iceagentkit's own read-only `chat.db` correlation (§9.4) hardcodes an assumption that turns out to be wrong on a machine with custom XDG vars set.
+12. **Graphify's and Headroom's Windows support** (§11.4): RTK explicitly confirms native Windows (v0.37.2+) plus WSL, and Omnigent's native Windows support (degraded) is now documented in detail — but Graphify's and Headroom's own Windows compatibility hasn't been checked against their source/docs the way the other two have. Needed before claiming iceagentkit works cross-platform as a whole, not just piece by piece.

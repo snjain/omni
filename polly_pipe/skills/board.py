@@ -9,12 +9,31 @@
 # there's no concurrent-write hazard to mediate; the TUI/web dashboard open
 # the same file read-only and poll it (see PRD §11, §14). WAL mode is set on
 # first connection so those readers don't block on this writer (PRD §16).
+#
+# Path resolution follows PRD §11.3 / §11.4: XDG on Linux AND macOS (matching
+# Omnigent's own convention - install_ledger.py, update_check.py, and its
+# onboarding modules all honor XDG_* on any OS rather than switching to
+# Apple's ~/Library/Application Support on macOS), %LOCALAPPDATA% on Windows.
+# Deliberately not using platformdirs' default macOS behavior, which would
+# diverge from that.
 
 import json
+import os
 import sqlite3
+import sys
 from pathlib import Path
 
-DB_PATH = Path.home() / ".iceagentkit" / "modules" / "polly-pipe" / "board.db"
+
+def _iceagentkit_data_dir() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "iceagentkit" / "data"
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "iceagentkit"
+
+
+DB_PATH = _iceagentkit_data_dir() / "modules" / "polly-pipe" / "board.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
