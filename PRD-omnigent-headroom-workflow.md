@@ -144,6 +144,22 @@ Both Apache 2.0 → bundling/redistribution is legally permitted; must retain ea
 
 **PR merge convention (confirmed via `examples/polly/config.yaml`)**: implementer sub-agents always open their own PR and never merge; the human merges. flowctl adopts this as-is — no auto-merge.
 
+### 9.4 Omnigent's session storage (`chat.db`) — and why flowctl doesn't write into it
+
+Confirmed directly in `omnigent-ai/omnigent`'s source (`docs/omni-upgrade-design.md`): *"All durable state lives in sqlite (`~/.omnigent/chat.db`), not in [the server/daemon] — server/daemon [is] safe to stop and respawn; they rehydrate from sqlite."* Locally this defaults to `~/.omnigent/chat.db`; hosted deployments (Fly, Render, HF Spaces, Cloudflare) can point `DATABASE_URL`/`--database-uri` at Postgres instead, since SQLite doesn't hold up under concurrent multi-instance access (Modal's own docs explicitly rule out a SQLite tier for that reason).
+
+`chat.db` holds more than literal chat messages — sessions, conversations, agents, files, policies, permissions, comments, and scheduled tasks each have their own store module (`omnigent/stores/{agent,artifact,comment,conversation,file,permission,policy,project,scheduled_task}_store`), all backed by the same SQLite file by default.
+
+**Checked whether flowctl could add its own `board` table into `chat.db` — no sanctioned way to do that:**
+- `omnigent/stores/` is a **fixed, closed list** of store modules, not a plugin registry.
+- Searched the repo for `"custom store"` and `register_store` — zero matches. No hook exists for registering a new store/table.
+- The schema is Alembic-migration-managed by Omnigent's own release process (`omnigent/db/migrations/versions/...`); an externally-added table would sit outside that history, with no compatibility guarantee across Omnigent upgrades, and risks lock contention with Omnigent's own server process as a second uncoordinated writer.
+
+**Decision: flowctl maintains its own separate SQLite database, `~/.flowctl/board.db`**, fully owned and schema-controlled by flowctl, independent of Omnigent's release cycle:
+- Only flowctl's local API server (`:7878`, see §11) reads/writes `board.db` directly — `record_board_state` never touches the file itself, it POSTs to that API, keeping DB access single-writer.
+- The web/TUI dashboards read from the same API server, not the file directly — one source of truth for board-specific data.
+- Optional, read-only correlation: the API server may separately open `~/.omnigent/chat.db` **read-only** to pull session/conversation metadata by `session_id`/`conversation_id` for display alongside a task — never as a write target.
+
 ## 10. Omnigent Extensibility Model
 
 Checked directly against the `omnigent-ai/omnigent` codebase (not inferred): **there is no plugin, hook, extension, or middleware system** — searched the repo for all four terms, zero matches. The only two extension surfaces are:
@@ -234,7 +250,7 @@ All orchestration logic (plan, decompose, dispatch, cross-model review, PR creat
 | Omnigent | Third-party meta-harness | No |
 | Harnesses (Claude Code, Codex, Cursor, OpenCode, Pi, Hermes) | Third-party coding agents | No |
 | Orchestrator agent (`config.yaml` + skills) | Custom Omnigent agent, forked from `examples/polly` | **Yes** — see `flowctl-orchestrator-config.yaml` in this repo |
-| flowctl local API / state store | Small server on :7878 | **Yes** |
+| flowctl local API / state store | Small server on :7878, backed by its own SQLite (`~/.flowctl/board.db`) — separate from Omnigent's `~/.omnigent/chat.db`, see §9.4 | **Yes** |
 | flowctl dashboard (web + TUI) | Render layers on the state API | **Yes** |
 | flowctl installer/setup | Install + wiring script | **Yes** |
 | GitHub | External | No |
