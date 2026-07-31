@@ -190,6 +190,23 @@ Checked against `Graphify-Labs/graphify` on GitHub, not just its marketing page:
 - **Disabling has no partial state**: the nudge hooks (the only "always-on" piece) have no dedicated off switch — only full or per-platform `graphify uninstall`. The skill and MCP tool are already inherently opt-in (only used if invoked/declared), so nothing to disable there.
 - **Separate git-hook mechanism** (`graphify hook install/uninstall/status`, post-commit/post-checkout) exists to keep the graph in sync with code changes — distinct from the nudge hooks above, not yet verified for reliability under polly-pipe's parallel-worktree execution model (§16 item 8).
 
+### 9.6 RTK — verified facts (third-party, optional)
+
+Checked against `rtk-ai/rtk` on GitHub:
+
+- **What it is**: a single Rust binary, zero dependencies, that intercepts *shell command output* (not model traffic) and compacts it before it enters an agent's context — condensed `git status`, failures-only test output (Jest/pytest/cargo test/go test), grouped lint/build errors, filtered package-manager/cloud/container CLI output. Claims "up to 90% of the bash output your agent reads," with an explicit, unusually honest disclaimer: *"it is not the same as cutting your bill by 90%."* Apache 2.0.
+- **Distribution**: Homebrew, a quick-install script, `cargo install`, or prebuilt binaries — a fourth distribution mechanism distinct from Headroom (pip), Omnigent (installer script), and Graphify (`uv tool`).
+- **A third, distinct token-reduction layer, not a duplicate of Graphify or Headroom**: Graphify reduces tokens needed for code-*relationship* questions (replacing grep/reads with graph queries); RTK reduces tokens from noisy *shell/CLI output* (replacing raw command output with compacted output); Headroom compresses whatever content actually reaches the model regardless of source. All three stack.
+- **Compatibility**: 15 agents, including every harness polly-pipe dispatches to (Claude Code, Cursor, Codex, OpenCode, Hermes, Pi) plus GitHub Copilot, Windsurf, Cline/Roo Code, Antigravity, and others. **Does not close the Copilot gap for this stack** — RTK working with Copilot is unrelated to Omnigent, which still doesn't support Copilot as a harness (§9.1 unaffected).
+- **No MCP server, no REST API** — CLI-first only (`rtk git status`, `rtk cargo test`, ...) plus native per-agent hook installation (`rtk init -g` for Claude Code, equivalent for the other 14). Unlike Graphify, there's no `type: mcp` tool to declare in a module's YAML — opting in means installing the native hook per harness and instructing the orchestrator's prompt to prefix relevant shell commands with `rtk`.
+- **Real limitation on Claude Code specifically**: the hook only rewrites `Bash` tool calls — `Read`/`Grep`/`Glob` bypass it entirely, requiring explicit `rtk read`/`rtk grep`/`rtk find` instead. The benefit is conditional on the orchestrator's prompt actually instructing that substitution, not automatic.
+- **Fits polly-pipe's Execute phase concretely**: Polly's own prompt already requires implementors to run tests/lint/typecheck and reconcile exact test counts — exactly the noisy output RTK targets — so wrapping those dispatch-time commands would reduce the `tokens`/`cost_usd` `record_board_state` reports per task, in the phase the paid-turn gate is spend-gating.
+- **Own analytics**: `rtk gain` is a built-in token-savings dashboard. Worth having `record_board_state` pull from it as a second savings source alongside Headroom's `compression_saved_tokens`, not just Headroom's number alone.
+- **Disabling has no partial state, same as Graphify**: uninstall is `rtk init -g --uninstall` (removes hook, `RTK.md`, `settings.json` entry; optionally `cargo uninstall rtk`/`brew uninstall rtk` for the binary itself). No global pause env var for the core filtering (only `RTK_TELEMETRY_DISABLED=1`, which is telemetry-only). No per-command bypass flag — only a static, pre-configured `exclude_commands` list in `~/.config/rtk/config.toml`. Once a hook is installed, every matching Bash call is rewritten with no per-invocation escape hatch.
+- **Telemetry**: opt-in, disabled by default, anonymous aggregate metrics (device hash, OS/version, command/token counts, tool names only — no arguments or secrets). Managed via `rtk telemetry enable/disable/forget`.
+
+**Pattern worth naming explicitly**: this is the second optional capability (after Graphify) whose only real lever is full install/uninstall, not a lightweight pause. Headroom's toggle is genuinely light (an env var/config flip); Graphify and RTK are not. Treat this as the default assumption for any *future* optional capability icemetaagents adds — the platform's job is to consistently wrap "vendor only offers install/uninstall" behind a clean `on/off/status` UX, not to expect a lighter switch to already exist.
+
 ## 10. Omnigent Extensibility Model
 
 Checked directly against the `omnigent-ai/omnigent` codebase (not inferred): **there is no plugin, hook, extension, or middleware system** — searched the repo for all four terms, zero matches. The only two extension surfaces are:
@@ -299,7 +316,7 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
 This is new, unspecified surface (§7 flags it as an open question) — captured here as a starting design, not a finished interface:
 
 **icemetaagents (platform) guarantees to every module:**
-- Omnigent installed, and Headroom + Graphify installed and wired **if enabled** — both are optional at platform setup, not forced (§11.2).
+- Omnigent installed, and Headroom + Graphify + RTK installed and wired **if enabled** — all three are optional at platform setup, none forced (§11.2).
 - A global compression toggle the module doesn't need to reimplement.
 - Isolated storage under `~/.icemetaagents/modules/<module-name>/` — no server required to use it; a module writes directly to its own SQLite file.
 
@@ -308,29 +325,35 @@ This is new, unspecified surface (§7 flags it as an open question) — captured
 - Any function-tool Python package it needs (e.g. polly-pipe's `record_board_state`), pip-installed into the same environment Omnigent's executor runs in.
 - Optionally, a view/schema registration for the shared dashboard (polly-pipe's is the task-board columns in §6) — a module that doesn't need a structured board can skip this and rely purely on the conversational session.
 - Its own CLI entrypoint if it wants one (polly-pipe ships `polly-pipe start`/`polly-pipe board`, both thin wrappers — see §13.2), independently pip-installable, so a module works standalone or via `icemetaagents run <module-name>`.
-- If it wants Graphify, an explicit opt-in — declaring the `graph: { type: mcp, ... }` tool entry in its own agent config (§11.2). Never assumed on just because the platform has it installed.
+- If it wants Graphify, an explicit opt-in — declaring the `graph: { type: mcp, ... }` tool entry in its own agent config (§11.2). If it wants RTK, an explicit opt-in of a different shape — installing RTK's native per-harness hooks and instructing its own prompt to use `rtk`-prefixed commands (§9.6), since there's no tool declaration for it the way there is for Graphify. Neither is ever assumed on just because the platform has it installed.
 
-### 11.2 Optional capabilities — Headroom and Graphify, at both the platform and module level
+### 11.2 Optional capabilities — Headroom, Graphify, and RTK, at both the platform and module level
 
-Neither Headroom nor Graphify is mandatory for icemetaagents or for any module. Both are opt-in at two independent points, and the two capabilities land differently at the module level — worth being precise about the asymmetry rather than implying symmetric control that doesn't exist yet:
+None of Headroom, Graphify, or RTK is mandatory for icemetaagents or for any module. All three are opt-in at two independent points, and they land differently at the module level — worth being precise about the asymmetry rather than implying uniform control that doesn't exist yet:
 
 | | Platform-level opt-in | Module-level opt-in |
 |---|---|---|
 | **Headroom (compression)** | `icemetaagents setup` asks whether to install/wire it at all; once wired, `icemetaagents compression on/off/status` toggles it (§9.2, §13.1) | **Not currently possible.** Compression is global across every module and plain `omnigent` usage alike — there is no per-module override today. Making it selective would need the per-harness/per-provider override granularity flagged as unverified in §16 item 3. Treat "compression on for polly-pipe but off for another module" as an unimplemented stretch goal, not a supported configuration. |
-| **Graphify (code graph)** | `icemetaagents setup` asks whether to install it (`graphify install`) | **Already naturally supported** — a module simply declares (or omits) the `graph: { type: mcp, url: ... }` tool entry in its own `orchestrator-config.yaml`. Graphify being installed platform-wide doesn't force any module to use it; each module's YAML is the real switch. |
+| **Graphify (code graph)** | `icemetaagents setup` asks whether to install it (`graphify install`); `icemetaagents graphify on/off/status` toggles it — "off" is a full `graphify uninstall` under the hood, no lighter state exists (§9.5) | **Already naturally supported** — a module simply declares (or omits) the `graph: { type: mcp, url: ... }` tool entry in its own `orchestrator-config.yaml`. Graphify being installed platform-wide doesn't force any module to use it; each module's YAML is the real switch. |
+| **RTK (shell output compaction)** | `icemetaagents setup` asks whether to install it; `icemetaagents rtk on/off/status` toggles it — same as Graphify, "off" is a full `rtk init -g --uninstall` per harness, no partial-disable state exists (§9.6) | **Supported, but by prompt instruction rather than a tool declaration** — no MCP server to declare. A module opts in by installing RTK's native hook for the harnesses it dispatches to and instructing its orchestrator's prompt to prefix relevant shell commands with `rtk`. Omitting both means RTK stays inert for that module even if installed platform-wide. |
 
-**Setup flow** (both prompted at `icemetaagents setup`, neither forced):
+**Setup flow** (all three prompted at `icemetaagents setup`, none forced):
 ```
 icemetaagents setup
   ? Enable Headroom compression for all Omnigent traffic? [Y/n]
   ? Install Graphify (local code knowledge graph)? [Y/n]
+  ? Install RTK (shell/CLI output compaction)? [Y/n]
 ```
-**Module registration flow** (Graphify only, since compression has no module-level knob yet):
+**Module registration flow** (Graphify and RTK only, since compression has no module-level knob yet):
 ```
 icemetaagents module add polly-pipe
   ? Graphify is installed on this platform. Use it for polly-pipe's
     dependency analysis and explore/search dispatches? [Y/n]
     (writes, or omits, the `graph:` tool entry in polly-pipe's orchestrator-config.yaml)
+  ? RTK is installed on this platform. Wrap test/lint/build/git commands
+    in polly-pipe's dispatches with it? [Y/n]
+    (installs RTK's native hook for claude_code/codex/opencode/cursor/hermes/pi,
+    and adds the rtk-prefix instruction to the orchestrator's prompt)
 ```
 
 ## 12. Implementation Files (in this repo)
@@ -348,9 +371,9 @@ curl -fsSL https://icemetaagents.dev/install.sh | sh   # pip-installs headroom-a
                                                           # installs omnigent
 
 icemetaagents setup      # collects provider/GitHub keys, spend caps, concurrency limit;
-                           # asks Y/n on Headroom compression and Graphify (§11.2) — both
-                           # optional, neither forced; if Headroom is enabled, starts its
-                           # proxy and wires Omnigent's base_url overrides to it — no
+                           # asks Y/n on Headroom compression, Graphify, and RTK (§11.2) —
+                           # all three optional, none forced; if Headroom is enabled, starts
+                           # its proxy and wires Omnigent's base_url overrides to it — no
                            # dashboard server to start, there isn't one (§11)
 
 icemetaagents doctor      # fires a dummy session through Omnigent and confirms Headroom's
@@ -367,15 +390,20 @@ icemetaagents graphify on | off | status   # installs/uninstalls Graphify platfo
                                              # install / uninstall under the hood, since
                                              # Graphify itself has no lighter toggle — §16)
 
+icemetaagents rtk on | off | status        # installs/uninstalls RTK's hooks platform-wide
+                                             # ("off" is `rtk init -g --uninstall` per harness,
+                                             # hook removal only — binary stays installed
+                                             # unless `--purge` is also passed; §9.6)
+
 icemetaagents module add polly-pipe    # registers a module (installs its agent + skills,
                                          # per the §11.1 contract); asks whether to wire
-                                         # in Graphify for this module specifically if it's
-                                         # installed platform-wide (§11.2)
+                                         # in Graphify and/or RTK for this module specifically,
+                                         # for whichever of the two are installed platform-wide (§11.2)
 icemetaagents module list
 icemetaagents module remove polly-pipe
 ```
 
-**Deliberately a single global compression switch, not per-harness controls** — icemetaagents always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle. **Graphify's switch is coarser still** — since the vendor tool has no partial-disable state, `icemetaagents graphify off` is a full `graphify uninstall` under the hood, not a paused/inactive state.
+**Deliberately a single global compression switch, not per-harness controls** — icemetaagents always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle. **Graphify's and RTK's switches are coarser still** — neither vendor tool has a partial-disable state, so `off` is a full `graphify uninstall` / `rtk init -g --uninstall` under the hood in both cases, not a paused/inactive state (§9.5, §9.6). This is treated as the default assumption for any future optional capability, not a one-off quirk of these two (§9.6's closing note).
 
 ### 13.2 Module (polly-pipe)
 
@@ -416,3 +444,4 @@ Sourced by polly-pipe's orchestrator from each sub-agent dispatch's result and i
 6. **SQLite concurrent read/write behavior** (§11, §14): confirm `board.db` is opened in WAL mode so the TUI/web dashboard's read-only polling doesn't hit "database is locked" against `record_board_state`'s writes. This is standard SQLite practice for a single-writer/multi-reader setup, but needs to actually be set when the DB is created, not assumed.
 7. **Per-module compression control** (§11.2): today compression is platform-global only — confirmed no design exists for "on for this module, off for that one." Whether this is worth building depends on item 3 above: it's only possible at all if the per-harness/per-provider overrides turn out to be independently addressable per session, which isn't yet confirmed.
 8. **Graphify's git-hook refresh mechanism** (`graphify hook install/uninstall/status`): confirmed to exist (separate from the nudge hooks), but not yet verified in practice — whether post-commit/post-checkout rebuilds are fast enough to keep the graph usably fresh during an active session, and whether they fire correctly across the parallel git worktrees polly-pipe's implementors use (the staleness risk flagged when Graphify was first discussed).
+9. **RTK's Bash-only hook limitation on Claude Code** (§9.6): the native hook only rewrites `Bash` tool calls — `Read`/`Grep`/`Glob` bypass it. If polly-pipe wants RTK's savings to actually apply, the orchestrator's prompt needs an explicit instruction to prefer `rtk read`/`rtk grep`/`rtk find` over those built-ins for Claude Code implementors specifically — confirm this instruction is both necessary and sufficient (i.e. that sub-agents reliably follow it) before assuming RTK delivers its claimed reduction in practice.
