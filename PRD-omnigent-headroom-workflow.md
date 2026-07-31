@@ -1,20 +1,20 @@
-# PRD: icemetaagents Platform + polly-pipe Module (Omnigent + Headroom)
+# PRD: iceagentkit Platform + polly-pipe Module (Omnigent + Headroom + Graphify + RTK)
 
-> **Naming history**: this document originally specified a single tool called `flowctl`. It has been restructured into two layers: **icemetaagents**, a shared platform for any module that needs Omnigent + Headroom set up, and **polly-pipe**, an independent module (the first one) that implements everything `flowctl` used to do end-to-end — the plan-to-PR workflow. Every `flowctl` reference below has been reassigned to whichever layer actually owns that responsibility. This split exists so future modules (not yet designed) can reuse the platform setup without re-implementing Omnigent/Headroom installation and wiring from scratch.
+> **Naming history**: this document originally specified a single tool called `flowctl`. It was first restructured into two layers — **icemetaagents**, a shared platform for any module that needs Omnigent + Headroom set up, and **polly-pipe**, an independent module (the first one) that implements everything `flowctl` used to do end-to-end. The platform was then renamed **iceagentkit** once its scope grew to cover optional AI-tooling capabilities beyond Omnigent + Headroom (Graphify, RTK — §9.5, §9.6) — checked and confirmed available on PyPI, npm, and GitHub before adopting it. Every reference below uses the current name; the split exists so future modules (not yet designed) can reuse the platform setup without re-implementing Omnigent/Headroom/Graphify/RTK installation and wiring from scratch.
 
 ## 1. Summary
 
-**icemetaagents** is the platform layer: it installs and wires Omnigent (multi-agent session harness) and Headroom (lossless context-compression middleware) once, exposes a global compression on/off switch, and runs a shared local API + dashboard framework (web + TUI) that independent modules register their own views into.
+**iceagentkit** is the platform layer: it installs and wires Omnigent (multi-agent session harness), Headroom (lossless context-compression middleware), Graphify (local code knowledge graph), and RTK (shell/CLI output compaction) — Headroom, Graphify, and RTK all optional (§11.2) — exposes on/off/status switches for each, and gives every module a place to keep its own storage without standing up its own server (§11, §14).
 
 **polly-pipe** is the first module built on that platform. It implements the plan-to-PR agentic workflow: users describe a goal in freeform text; an agent turns it into a detailed plan through human-reviewed iteration; once approved, the plan is decomposed into a dependency-aware task board where each task is implemented and reviewed by AI models (assigned via Omnigent's router), with humans gating the two points where real work/spend begins — plan finalization and task-board finalization ("the paid turn"). Every session polly-pipe runs goes through Headroom's compression layer via the platform's wiring.
 
 ## 2. Goals
 
-### Platform (icemetaagents)
+### Platform (iceagentkit)
 - Install and wire Omnigent + Headroom once; any module reuses that setup rather than repeating it.
 - Provide one global compression on/off/status switch, shared across all modules (see §9.2, §13.1).
 - Run a shared local API + dashboard framework (web + TUI) that modules register their own data/views into, rather than each module standing up its own server.
-- Maintain a module registry (`icemetaagents module add/list/remove`) so installing a new module is a single step once the platform is set up.
+- Maintain a module registry (`iceagentkit module add/list/remove`) so installing a new module is a single step once the platform is set up.
 
 ### Module (polly-pipe)
 - Turn a freeform requirement into a reviewed, human-approved implementation plan.
@@ -102,11 +102,11 @@
 
 - **Concurrency limits**: exact max concurrent tasks / cost-throttling values are a config choice at implementation time (`spawn_bounds.max_dispatches_per_turn`).
 - **Complexity → model mapping**: left to `sys_advise_models`' own recommendation at dispatch time, not a bespoke rubric.
-- **Module registration contract** (§11.1): the exact manifest format a module provides to `icemetaagents module add` is not yet specified — polly-pipe is the reference case to design it against, not an already-defined interface.
+- **Module registration contract** (§11.1): the exact manifest format a module provides to `iceagentkit module add` is not yet specified — polly-pipe is the reference case to design it against, not an already-defined interface.
 
 ## 8. Assumptions
 
-- Omnigent and Headroom are used as-is (third-party products); icemetaagents is a platform layer built on top, not a fork/modification of either.
+- Omnigent and Headroom are used as-is (third-party products); iceagentkit is a platform layer built on top, not a fork/modification of either.
 - Omnigent's `sys_advise_models` is the mechanism used for per-task model assignment — polly-pipe supplies the complexity signals, Omnigent's router makes the assignment.
 - "Paid turn" refers to the transition from planning (cheap/iterative) to task execution (real spend across potentially many models/tasks).
 
@@ -140,13 +140,13 @@ Neither product's docs mention the other by name, but the mechanism to connect t
 - **Omnigent's Gateway** accepts "any OpenAI- or Anthropic-compatible `base_url` and key" (examples given: OpenRouter, Ollama). Configured via `omnigent setup`.
 - **Headroom's proxy mode** (`headroom proxy --port 8787`) serves both Anthropic `/v1/messages` and OpenAI-compatible `/v1/chat/completions`/`/v1/responses` routes locally, compressing transparently before forwarding to the real provider.
 
-**Wiring**: point Omnigent's `base_url` override(s) at `http://localhost:8787` (Headroom's proxy). Every model call routed through it gets compressed before reaching the real provider. **This wiring is done once by icemetaagents during platform setup — every module, including polly-pipe, inherits it automatically.**
+**Wiring**: point Omnigent's `base_url` override(s) at `http://localhost:8787` (Headroom's proxy). Every model call routed through it gets compressed before reaching the real provider. **This wiring is done once by iceagentkit during platform setup — every module, including polly-pipe, inherits it automatically.**
 
 **Correction — this is likely not one unified knob.** Earlier drafts of this PRD described a single "Gateway `base_url`" setting. Searching Omnigent's source shows separate, narrower overrides instead: general provider vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`) plus per-harness gateway vars (`HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`, and presumably others per harness). Whether `omnigent setup` unifies these into one config entry for you, or you'd need to set several independently, is **not yet confirmed** — flag as a §16 item: enumerate the full set of base_url-style knobs before implementation.
 
 **Unverified assumption (needs a PoC before relying on it, see §16)**: whether Omnigent's Gateway sits in the request path for *every* harness session (Claude Code, Cursor, OpenCode, etc.) or only for Omnigent's own built-in/custom agents. If it's the latter, only a module's orchestrator "brain" calls get compressed, not the sub-agent harnesses' calls.
 
-**Design decision — icemetaagents presents one global switch regardless.** Even though the underlying knobs may be per-provider/per-harness, icemetaagents deliberately does not expose that granularity to the user. `icemetaagents compression on` / `icemetaagents compression off` sets or unsets *every* known base_url override together, so compression is a single on/off decision from the user's point of view, shared across every installed module — see §13.1. The risk this creates: if a new harness's gateway var isn't in icemetaagents' known list, toggling "off" could leave that one harness still routed through Headroom, silently breaking the "global switch" promise. §16 needs an explicit, versioned list of every override icemetaagents must touch, kept in sync as Omnigent adds harnesses.
+**Design decision — iceagentkit presents one global switch regardless.** Even though the underlying knobs may be per-provider/per-harness, iceagentkit deliberately does not expose that granularity to the user. `iceagentkit compression on` / `iceagentkit compression off` sets or unsets *every* known base_url override together, so compression is a single on/off decision from the user's point of view, shared across every installed module — see §13.1. The risk this creates: if a new harness's gateway var isn't in iceagentkit's known list, toggling "off" could leave that one harness still routed through Headroom, silently breaking the "global switch" promise. §16 needs an explicit, versioned list of every override iceagentkit must touch, kept in sync as Omnigent adds harnesses.
 
 ### 9.3 Distribution & licensing
 
@@ -156,7 +156,7 @@ Neither product's docs mention the other by name, but the mechanism to connect t
 | License | Apache 2.0, open source | Apache 2.0, open source |
 | Repo | github.com (search `headroom-ai`) | `omnigent-ai/omnigent` |
 
-Both Apache 2.0 → bundling/redistribution is legally permitted; must retain each project's `LICENSE`/`NOTICE` and mark any modifications. No requirement to open-source icemetaagents' or polly-pipe's own code.
+Both Apache 2.0 → bundling/redistribution is legally permitted; must retain each project's `LICENSE`/`NOTICE` and mark any modifications. No requirement to open-source iceagentkit's or polly-pipe's own code.
 
 **PR merge convention (confirmed via `examples/polly/config.yaml`)**: implementer sub-agents always open their own PR and never merge; the human merges. polly-pipe adopts this as-is — no auto-merge.
 
@@ -171,11 +171,11 @@ Confirmed directly in `omnigent-ai/omnigent`'s source (`docs/omni-upgrade-design
 - Searched the repo for `"custom store"` and `register_store` — zero matches. No hook exists for registering a new store/table.
 - The schema is Alembic-migration-managed by Omnigent's own release process (`omnigent/db/migrations/versions/...`); an externally-added table would sit outside that history, with no compatibility guarantee across Omnigent upgrades, and risks lock contention with Omnigent's own server process as a second uncoordinated writer.
 
-**Decision: each module maintains its own separate SQLite database under the platform's data directory**, fully owned and schema-controlled by that module, independent of Omnigent's release cycle. polly-pipe's board lives at `~/.icemetaagents/modules/polly-pipe/board.db`:
+**Decision: each module maintains its own separate SQLite database under the platform's data directory**, fully owned and schema-controlled by that module, independent of Omnigent's release cycle. polly-pipe's board lives at `~/.iceagentkit/modules/polly-pipe/board.db`:
 - **No standing server sits in front of it.** `record_board_state` (running inside the orchestrator's own process) writes directly to `board.db` — it's the sole writer, so there's no concurrent-write hazard to design around. This replaced an earlier draft of this PRD that routed writes through a persistent local API server; that hop added a process and a port for no benefit once the single-writer property was recognized (see §11/§13.2/§14 for the revised, server-light design).
 - Dashboards **read** the same file — the TUI opens it read-only and polls (task state doesn't change sub-second, so polling is sufficient — no push infrastructure needed); the web dashboard, when used, is served by an on-demand process rather than a persistent one (§14).
 - Optional, read-only correlation: a dashboard reader may separately open `~/.omnigent/chat.db` **read-only** to pull session/conversation metadata by `session_id`/`conversation_id` for display alongside a task — never as a write target.
-- A future module gets its own `~/.icemetaagents/modules/<name>/*.db`, namespaced the same way — no shared schema to coordinate across modules, and no shared server to keep running either.
+- A future module gets its own `~/.iceagentkit/modules/<name>/*.db`, namespaced the same way — no shared schema to coordinate across modules, and no shared server to keep running either.
 
 ### 9.5 Graphify — verified facts (third-party, optional)
 
@@ -205,13 +205,13 @@ Checked against `rtk-ai/rtk` on GitHub:
 - **Disabling has no partial state, same as Graphify**: uninstall is `rtk init -g --uninstall` (removes hook, `RTK.md`, `settings.json` entry; optionally `cargo uninstall rtk`/`brew uninstall rtk` for the binary itself). No global pause env var for the core filtering (only `RTK_TELEMETRY_DISABLED=1`, which is telemetry-only). No per-command bypass flag — only a static, pre-configured `exclude_commands` list in `~/.config/rtk/config.toml`. Once a hook is installed, every matching Bash call is rewritten with no per-invocation escape hatch.
 - **Telemetry**: opt-in, disabled by default, anonymous aggregate metrics (device hash, OS/version, command/token counts, tool names only — no arguments or secrets). Managed via `rtk telemetry enable/disable/forget`.
 
-**Pattern worth naming explicitly**: this is the second optional capability (after Graphify) whose only real lever is full install/uninstall, not a lightweight pause. Headroom's toggle is genuinely light (an env var/config flip); Graphify and RTK are not. Treat this as the default assumption for any *future* optional capability icemetaagents adds — the platform's job is to consistently wrap "vendor only offers install/uninstall" behind a clean `on/off/status` UX, not to expect a lighter switch to already exist.
+**Pattern worth naming explicitly**: this is the second optional capability (after Graphify) whose only real lever is full install/uninstall, not a lightweight pause. Headroom's toggle is genuinely light (an env var/config flip); Graphify and RTK are not. Treat this as the default assumption for any *future* optional capability iceagentkit adds — the platform's job is to consistently wrap "vendor only offers install/uninstall" behind a clean `on/off/status` UX, not to expect a lighter switch to already exist.
 
 ## 10. Omnigent Extensibility Model
 
 Checked directly against the `omnigent-ai/omnigent` codebase (not inferred): **there is no plugin, hook, extension, or middleware system** — searched the repo for all four terms, zero matches. The only two extension surfaces are:
 
-1. **Custom agents** — a YAML file (`spec_version`, `name`, `prompt`, `executor`, `tools`, `guardrails`, ...) invoked via `omnigent run path/to/config.yaml`. No alias/registry exists; there's no way to invoke a custom agent as a short top-level command like a built-in harness. (icemetaagents' module registry, §11.1, is what supplies that convenience — Omnigent itself doesn't.)
+1. **Custom agents** — a YAML file (`spec_version`, `name`, `prompt`, `executor`, `tools`, `guardrails`, ...) invoked via `omnigent run path/to/config.yaml`. No alias/registry exists; there's no way to invoke a custom agent as a short top-level command like a built-in harness. (iceagentkit's module registry, §11.1, is what supplies that convenience — Omnigent itself doesn't.)
 2. **The Gateway config** — the `base_url`/key override described in §9.2, the only way to intercept/redirect model traffic.
 
 Within a custom agent, two categories of extension are easy to conflate — they are **not** the same thing:
@@ -236,7 +236,7 @@ This is distinct from adding a whole new **module** (§11.1), which is a platfor
 
 ## 11. Final Architecture — Platform / Module Split
 
-All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, cross-model review, PR creation, all three approval gates) lives **inside Omnigent** as polly-pipe's custom agent, invoked purely via `omnigent run`. icemetaagents is deliberately thin at the platform level too — it exists to do once, for every module, the things Omnigent structurally cannot host itself: installation/wiring and a global compression switch. It does **not** run a persistent dashboard server (see the revision note below) — dashboards read module state directly.
+All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, cross-model review, PR creation, all three approval gates) lives **inside Omnigent** as polly-pipe's custom agent, invoked purely via `omnigent run`. iceagentkit is deliberately thin at the platform level too — it exists to do once, for every module, the things Omnigent structurally cannot host itself: installation/wiring and a global compression switch. It does **not** run a persistent dashboard server (see the revision note below) — dashboards read module state directly.
 
 **Revision — dropped the persistent local API/state server.** An earlier draft of this architecture put a standing HTTP server (`:7878`) between `record_board_state` and each module's SQLite file, to support live-push updates to the dashboard. On review this added a process and a port for no real benefit: `record_board_state` is the *sole* writer to its module's database (no concurrent-write hazard to mediate), and task-board state doesn't change fast enough to need push updates — polling a SQLite file every second or two is indistinguishable in practice. The server is gone; see §13.2/§14 for the resulting design.
 
@@ -261,7 +261,7 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
                     │                          │   └──────────┬────────────┘
                     │  record_board_state()    │              │ read-only,
                     │  writes directly to       │              │ no push
-                    │  ~/.icemetaagents/modules/│              │
+                    │  ~/.iceagentkit/modules/│              │
                     │  polly-pipe/board.db      │◀─────────────┘
                     └───────────┬────────────────┘
                                 │ dispatches sub-agents
@@ -278,7 +278,7 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
                     │   OMNIGENT (the host)         │
                     │   sessions, sandboxing,        │
                     │   base_url overrides           │
-                    │   (wired once by icemetaagents) │
+                    │   (wired once by iceagentkit) │
                     └───────────┬────────────────────┘
                                 │ overrides point here
                                 ▼
@@ -305,8 +305,8 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
 | Headroom | Third-party pip package, proxy on :8787 | — | No |
 | Omnigent | Third-party meta-harness, own web UI on :6767 | — | No |
 | Harnesses (Claude Code, Codex, Cursor, OpenCode, Pi, Hermes) | Third-party coding agents | — | No |
-| Installer/setup, compression toggle | Installs Headroom + Omnigent once, wires base_url overrides, `compression on/off/status` | **icemetaagents (platform)** | **Yes** |
-| Module registry | `icemetaagents module add/list/remove` | **icemetaagents (platform)** | **Yes** |
+| Installer/setup, compression toggle | Installs Headroom + Omnigent once, wires base_url overrides, `compression on/off/status` | **iceagentkit (platform)** | **Yes** |
+| Module registry | `iceagentkit module add/list/remove` | **iceagentkit (platform)** | **Yes** |
 | Orchestrator agent (`config.yaml` + skills) | polly-pipe's custom Omnigent agent, forked from `examples/polly`; `record_board_state` writes `board.db` directly | **polly-pipe (module)** | **Yes** — see `polly-pipe/orchestrator-config.yaml` in this repo |
 | Dashboard (TUI always available; web on-demand) | Reads `board.db` directly, read-only, polling — no server in the write path, and no server at all for the TUI | **polly-pipe (module)** | **Yes** |
 | GitHub | External | — | No |
@@ -315,38 +315,38 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
 
 This is new, unspecified surface (§7 flags it as an open question) — captured here as a starting design, not a finished interface:
 
-**icemetaagents (platform) guarantees to every module:**
+**iceagentkit (platform) guarantees to every module:**
 - Omnigent installed, and Headroom + Graphify + RTK installed and wired **if enabled** — all three are optional at platform setup, none forced (§11.2).
 - A global compression toggle the module doesn't need to reimplement.
-- Isolated storage under `~/.icemetaagents/modules/<module-name>/` — no server required to use it; a module writes directly to its own SQLite file.
+- Isolated storage under `~/.iceagentkit/modules/<module-name>/` — no server required to use it; a module writes directly to its own SQLite file.
 
-**A module must provide, to be registered via `icemetaagents module add <name>`:**
+**A module must provide, to be registered via `iceagentkit module add <name>`:**
 - An Omnigent-invocable agent directory (`config.yaml` + optional `skills/*/SKILL.md`), same shape as polly-pipe's.
 - Any function-tool Python package it needs (e.g. polly-pipe's `record_board_state`), pip-installed into the same environment Omnigent's executor runs in.
 - Optionally, a view/schema registration for the shared dashboard (polly-pipe's is the task-board columns in §6) — a module that doesn't need a structured board can skip this and rely purely on the conversational session.
-- Its own CLI entrypoint if it wants one (polly-pipe ships `polly-pipe start`/`polly-pipe board`, both thin wrappers — see §13.2), independently pip-installable, so a module works standalone or via `icemetaagents run <module-name>`.
+- Its own CLI entrypoint if it wants one (polly-pipe ships `polly-pipe start`/`polly-pipe board`, both thin wrappers — see §13.2), independently pip-installable, so a module works standalone or via `iceagentkit run <module-name>`.
 - If it wants Graphify, an explicit opt-in — declaring the `graph: { type: mcp, ... }` tool entry in its own agent config (§11.2). If it wants RTK, an explicit opt-in of a different shape — installing RTK's native per-harness hooks and instructing its own prompt to use `rtk`-prefixed commands (§9.6), since there's no tool declaration for it the way there is for Graphify. Neither is ever assumed on just because the platform has it installed.
 
 ### 11.2 Optional capabilities — Headroom, Graphify, and RTK, at both the platform and module level
 
-None of Headroom, Graphify, or RTK is mandatory for icemetaagents or for any module. All three are opt-in at two independent points, and they land differently at the module level — worth being precise about the asymmetry rather than implying uniform control that doesn't exist yet:
+None of Headroom, Graphify, or RTK is mandatory for iceagentkit or for any module. All three are opt-in at two independent points, and they land differently at the module level — worth being precise about the asymmetry rather than implying uniform control that doesn't exist yet:
 
 | | Platform-level opt-in | Module-level opt-in |
 |---|---|---|
-| **Headroom (compression)** | `icemetaagents setup` asks whether to install/wire it at all; once wired, `icemetaagents compression on/off/status` toggles it (§9.2, §13.1) | **Not currently possible.** Compression is global across every module and plain `omnigent` usage alike — there is no per-module override today. Making it selective would need the per-harness/per-provider override granularity flagged as unverified in §16 item 3. Treat "compression on for polly-pipe but off for another module" as an unimplemented stretch goal, not a supported configuration. |
-| **Graphify (code graph)** | `icemetaagents setup` asks whether to install it (`graphify install`); `icemetaagents graphify on/off/status` toggles it — "off" is a full `graphify uninstall` under the hood, no lighter state exists (§9.5) | **Already naturally supported** — a module simply declares (or omits) the `graph: { type: mcp, url: ... }` tool entry in its own `orchestrator-config.yaml`. Graphify being installed platform-wide doesn't force any module to use it; each module's YAML is the real switch. |
-| **RTK (shell output compaction)** | `icemetaagents setup` asks whether to install it; `icemetaagents rtk on/off/status` toggles it — same as Graphify, "off" is a full `rtk init -g --uninstall` per harness, no partial-disable state exists (§9.6) | **Supported, but by prompt instruction rather than a tool declaration** — no MCP server to declare. A module opts in by installing RTK's native hook for the harnesses it dispatches to and instructing its orchestrator's prompt to prefix relevant shell commands with `rtk`. Omitting both means RTK stays inert for that module even if installed platform-wide. |
+| **Headroom (compression)** | `iceagentkit setup` asks whether to install/wire it at all; once wired, `iceagentkit compression on/off/status` toggles it (§9.2, §13.1) | **Not currently possible.** Compression is global across every module and plain `omnigent` usage alike — there is no per-module override today. Making it selective would need the per-harness/per-provider override granularity flagged as unverified in §16 item 3. Treat "compression on for polly-pipe but off for another module" as an unimplemented stretch goal, not a supported configuration. |
+| **Graphify (code graph)** | `iceagentkit setup` asks whether to install it (`graphify install`); `iceagentkit graphify on/off/status` toggles it — "off" is a full `graphify uninstall` under the hood, no lighter state exists (§9.5) | **Already naturally supported** — a module simply declares (or omits) the `graph: { type: mcp, url: ... }` tool entry in its own `orchestrator-config.yaml`. Graphify being installed platform-wide doesn't force any module to use it; each module's YAML is the real switch. |
+| **RTK (shell output compaction)** | `iceagentkit setup` asks whether to install it; `iceagentkit rtk on/off/status` toggles it — same as Graphify, "off" is a full `rtk init -g --uninstall` per harness, no partial-disable state exists (§9.6) | **Supported, but by prompt instruction rather than a tool declaration** — no MCP server to declare. A module opts in by installing RTK's native hook for the harnesses it dispatches to and instructing its orchestrator's prompt to prefix relevant shell commands with `rtk`. Omitting both means RTK stays inert for that module even if installed platform-wide. |
 
-**Setup flow** (all three prompted at `icemetaagents setup`, none forced):
+**Setup flow** (all three prompted at `iceagentkit setup`, none forced):
 ```
-icemetaagents setup
+iceagentkit setup
   ? Enable Headroom compression for all Omnigent traffic? [Y/n]
   ? Install Graphify (local code knowledge graph)? [Y/n]
   ? Install RTK (shell/CLI output compaction)? [Y/n]
 ```
 **Module registration flow** (Graphify and RTK only, since compression has no module-level knob yet):
 ```
-icemetaagents module add polly-pipe
+iceagentkit module add polly-pipe
   ? Graphify is installed on this platform. Use it for polly-pipe's
     dependency analysis and explore/search dispatches? [Y/n]
     (writes, or omits, the `graph:` tool entry in polly-pipe's orchestrator-config.yaml)
@@ -356,61 +356,114 @@ icemetaagents module add polly-pipe
     and adds the rtk-prefix instruction to the orchestrator's prompt)
 ```
 
+### 11.3 Package/Config Layout — where everything actually lives
+
+Same principle already established for `chat.db` (§9.4): **iceagentkit does not duplicate or re-host any vendor tool's own config or data.** It owns exactly three things — secrets (written into each tool's own expected mechanism, not a new store), a thin capabilities manifest (so `status` commands read one file instead of re-probing four different vendor tools each time), and module storage. Everything else stays wherever the vendor tool already puts it.
+
+**`~/.iceagentkit/` — what the platform owns:**
+```
+~/.iceagentkit/
+├── env                        # the ONE file a human edits: ANTHROPIC_API_KEY,
+│                                OPENAI_API_KEY, GITHUB_TOKEN, etc. Written once by
+│                                `iceagentkit setup`, chmod 600. Propagating these into
+│                                each vendor tool's own expected env var/config location
+│                                is iceagentkit's job — a human only ever touches this
+│                                one file, not four different tools' separate configs.
+├── config.toml                 # platform settings: spend caps, concurrency limit,
+│                                 default provider — NOT secrets (those live in `env`)
+├── capabilities.json            # manifest: { "headroom": {"installed": true, "enabled": true},
+│                                  "graphify": {"installed": true, "enabled": false},
+│                                  "rtk": {"installed": false} } — what
+│                                  `iceagentkit compression/graphify/rtk status` actually
+│                                  reads (§9.2, §9.5, §9.6), not re-derived by re-checking
+│                                  every vendor tool's own state each call
+├── modules/
+│   ├── registry.json             # installed modules, source (pip package/git url), version
+│   ├── polly-pipe/
+│   │   ├── agents/orchestrator/config.yaml   # INSTALLED copy — see source-vs-installed below
+│   │   ├── board.db                           # per §9.4/§11
+│   │   └── module.toml                        # which optional capabilities (graphify/rtk)
+│   │                                            this module opted into, per §11.2's prompts
+│   └── <future-module>/...                    # same shape, fully isolated from polly-pipe's
+└── logs/                          # iceagentkit's own operational log (setup/doctor runs) —
+                                     not Omnigent's chat.db, not any vendor tool's own logs
+```
+
+**What stays vendor-owned, untouched (confirmed locations where verified, flagged where not):**
+```
+~/.omnigent/chat.db          — Omnigent's own (§9.4) — confirmed
+~/.config/rtk/config.toml    — RTK's own, e.g. exclude_commands (§9.6) — confirmed
+<repo>/graphify-out/graph.json — Graphify's own, PER-REPO not global (§9.5) — confirmed
+Headroom's own proxy/runtime config — location not yet confirmed — §16 item 10
+```
+
+**Install-dependency matrix** — four different package managers, coordinated by one installer:
+
+| Tool | Package manager | What `iceagentkit install` (formerly the platform install step, §13.1) does |
+|---|---|---|
+| Omnigent | shell installer / `uv tool install omnigent` | invokes it |
+| Headroom | pip | `pip install "headroom-ai[all]"` |
+| Graphify | `uv tool install graphifyy` + `graphify install` | invokes both, only if enabled (§11.2) |
+| RTK | Homebrew / cargo / prebuilt binary | invokes the relevant installer, only if enabled (§11.2) |
+
+**Module source vs. installed copy** — a distinction that matters for how `polly-pipe/orchestrator-config.yaml` in *this* repo relates to what ends up on a user's machine: the file in this repo is the **capability-agnostic source template** (no assumption baked in about whether Graphify/RTK are enabled). `iceagentkit module add polly-pipe` is what turns source into an installed copy at `~/.iceagentkit/modules/polly-pipe/agents/orchestrator/config.yaml` — templating in (or leaving out) the `graph:` MCP tool entry and the RTK prompt instructions based on the §11.2 setup answers, and pip-installing `polly_pipe.skills.board` into the same environment Omnigent's executor runs in. Editing the installed copy directly is expected to be overwritten on the next `module add`/upgrade — real changes belong in the source template.
+
 ## 12. Implementation Files (in this repo)
 
 - **`polly-pipe/orchestrator-config.yaml`** *(renamed from `flowctl-orchestrator-config.yaml`)* — polly-pipe's orchestrator agent template: five-phase prompt (plan → decompose → board review → paid-turn → execute), `spawn: true` for dynamic sub-agents, `record_board_state` function-tool wiring, guardrails (`blast_radius`, `spawn_bounds`, `headless_subagent_purpose_guard`) reused from Omnigent's own reference orchestrator. Placeholders marked `[Reuse polly's proven prose verbatim for: ...]` should be filled by copying the matching sections from `examples/polly/config.yaml` in the `omnigent-ai/omnigent` repo rather than re-deriving them.
 - **`polly_pipe/skills/board.py`** *(renamed from `flowctl_skills/board.py`)* — the one real Python function tool (`record_board_state`), writing task state directly to `board.db` (no API hop — see §11's revision note). This is the only custom code referenced from the orchestrator's `tools:` block; everything else in the YAML is prose.
 - Sub-agent configs (`claude_code`, `codex`, `opencode`, `cursor`, `hermes`, `pi`) need **no changes** from Omnigent's own `examples/polly/agents/<name>/config.yaml` — board reporting is orchestrator-side only, and lives with polly-pipe, not with any other module.
+- **`config-templates/`** — example scaffolding for the `~/.iceagentkit/` layout in §11.3: `env.example`, `config.toml.example`, `capabilities.json.example`, and `modules/polly-pipe/module.toml.example`, so the layout is concrete rather than only described in prose.
 
 ## 13. Installation & CLI UX
 
-### 13.1 Platform (icemetaagents)
+### 13.1 Platform (iceagentkit)
 
 ```bash
-curl -fsSL https://icemetaagents.dev/install.sh | sh   # pip-installs headroom-ai,
+curl -fsSL https://iceagentkit.dev/install.sh | sh   # pip-installs headroom-ai,
                                                           # installs omnigent
 
-icemetaagents setup      # collects provider/GitHub keys, spend caps, concurrency limit;
+iceagentkit setup      # collects provider/GitHub keys, spend caps, concurrency limit;
                            # asks Y/n on Headroom compression, Graphify, and RTK (§11.2) —
                            # all three optional, none forced; if Headroom is enabled, starts
                            # its proxy and wires Omnigent's base_url overrides to it — no
                            # dashboard server to start, there isn't one (§11)
 
-icemetaagents doctor      # fires a dummy session through Omnigent and confirms Headroom's
+iceagentkit doctor      # fires a dummy session through Omnigent and confirms Headroom's
                            # proxy actually saw and compressed the traffic — the built-in
                            # version of the §16 PoC, so it's checkable on every install
                            # (skipped/no-op if compression wasn't enabled)
 
-icemetaagents compression on | off | status   # global switch, shared across every
+iceagentkit compression on | off | status   # global switch, shared across every
                                                 # installed module — see §9.2. Platform-level
                                                 # only; no per-module override exists (§11.2)
 
-icemetaagents graphify on | off | status   # installs/uninstalls Graphify platform-wide
+iceagentkit graphify on | off | status   # installs/uninstalls Graphify platform-wide
                                              # ("on"/"off" here really means graphify
                                              # install / uninstall under the hood, since
                                              # Graphify itself has no lighter toggle — §16)
 
-icemetaagents rtk on | off | status        # installs/uninstalls RTK's hooks platform-wide
+iceagentkit rtk on | off | status        # installs/uninstalls RTK's hooks platform-wide
                                              # ("off" is `rtk init -g --uninstall` per harness,
                                              # hook removal only — binary stays installed
                                              # unless `--purge` is also passed; §9.6)
 
-icemetaagents module add polly-pipe    # registers a module (installs its agent + skills,
+iceagentkit module add polly-pipe    # registers a module (installs its agent + skills,
                                          # per the §11.1 contract); asks whether to wire
                                          # in Graphify and/or RTK for this module specifically,
                                          # for whichever of the two are installed platform-wide (§11.2)
-icemetaagents module list
-icemetaagents module remove polly-pipe
+iceagentkit module list
+iceagentkit module remove polly-pipe
 ```
 
-**Deliberately a single global compression switch, not per-harness controls** — icemetaagents always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle. **Graphify's and RTK's switches are coarser still** — neither vendor tool has a partial-disable state, so `off` is a full `graphify uninstall` / `rtk init -g --uninstall` under the hood in both cases, not a paused/inactive state (§9.5, §9.6). This is treated as the default assumption for any future optional capability, not a one-off quirk of these two (§9.6's closing note).
+**Deliberately a single global compression switch, not per-harness controls** — iceagentkit always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle. **Graphify's and RTK's switches are coarser still** — neither vendor tool has a partial-disable state, so `off` is a full `graphify uninstall` / `rtk init -g --uninstall` under the hood in both cases, not a paused/inactive state (§9.5, §9.6). This is treated as the default assumption for any future optional capability, not a one-off quirk of these two (§9.6's closing note).
 
 ### 13.2 Module (polly-pipe)
 
 Day-to-day, the actual plan/board/execution interaction happens **inside the interactive `omnigent run` session** (conversational, per §10) — polly-pipe does not reimplement `plan new`/`board create` as separate CLI business logic. Its own CLI surface is a thin, independently pip-installable wrapper:
 
 ```bash
-polly-pipe start   # shorthand for: omnigent run ~/.icemetaagents/modules/polly-pipe/agents/orchestrator/config.yaml
+polly-pipe start   # shorthand for: omnigent run ~/.iceagentkit/modules/polly-pipe/agents/orchestrator/config.yaml
 polly-pipe board    # TUI by default: opens board.db read-only, polls every ~1-2s,
                       # no server process involved
 polly-pipe board --web   # spins up a minimal, stateless, read-only HTTP process on
@@ -420,14 +473,14 @@ polly-pipe board --web   # spins up a minimal, stateless, read-only HTTP process
                            # running in the background afterward
 
 # equivalently, via the platform once the module is registered:
-icemetaagents run polly-pipe
+iceagentkit run polly-pipe
 ```
 
 ## 14. Dashboard: TUI (default) + On-Demand Web
 
 Revised from an earlier draft that had both as render layers on a persistent shared state-API server — that server added a process and a port with no real benefit once `record_board_state` was recognized as the sole writer to `board.db` (see §11's revision note). The current design:
 
-- **TUI (default, no server at all)**: a local process (recommended: **Textual**, Python, matches the rest of the stack) opens `~/.icemetaagents/modules/polly-pipe/board.db` read-only and polls it every ~1-2 seconds. Task-board state doesn't change fast enough to need push updates, so polling is indistinguishable from push in practice, without the complexity.
+- **TUI (default, no server at all)**: a local process (recommended: **Textual**, Python, matches the rest of the stack) opens `~/.iceagentkit/modules/polly-pipe/board.db` read-only and polls it every ~1-2 seconds. Task-board state doesn't change fast enough to need push updates, so polling is indistinguishable from push in practice, without the complexity.
 - **Web (`--web`, on-demand only)**: since a browser can't open a local SQLite file directly, a minimal HTTP process is required here — but it's stateless (queries `board.db` per request, holds nothing in memory) and only runs while explicitly requested, not as a background service. Tradeoff to keep in mind: Omnigent's own selling point is session continuity across terminal → browser → phone; "check the board from my phone" only works while the on-demand web process happens to be running — if that matters as an always-available capability rather than an occasional one, it would need to become a persistent service again, reintroducing the port/process this revision removed.
 
 ## 15. Cost/Token/Compression Reporting
@@ -437,11 +490,12 @@ Sourced by polly-pipe's orchestrator from each sub-agent dispatch's result and i
 ## 16. Remaining Unverified Assumptions — Do These Before Committing Further
 
 1. **Gateway request-path scope** (§9.2): confirm Omnigent's base_url overrides actually intercept *every* harness's model calls, not just the orchestrator's own. Test: point the override(s) at a dummy logging server, dispatch a Cursor- or Claude-Code-orchestrated sub-agent task, confirm the dummy server sees it.
-2. **`omnigent setup`'s config format**: inspect what it actually writes (e.g. `~/.omnigent/...`) so `icemetaagents setup` can pre-populate/patch it programmatically rather than requiring interactive input.
-3. **Full enumeration of base_url-style overrides** (§9.2): confirmed so far — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`. Unconfirmed — whether every other harness (Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity) has its own equivalent, and whether `omnigent setup` exposes one unified entry point for all of them or each must be set independently. This list is exactly what `icemetaagents compression on/off` needs to stay complete and correct — treat it as a living list, re-verified whenever Omnigent adds a harness.
+2. **`omnigent setup`'s config format**: inspect what it actually writes (e.g. `~/.omnigent/...`) so `iceagentkit setup` can pre-populate/patch it programmatically rather than requiring interactive input.
+3. **Full enumeration of base_url-style overrides** (§9.2): confirmed so far — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `HARNESS_PI_GATEWAY_BASE_URL`, `HARNESS_QWEN_GATEWAY_BASE_URL`. Unconfirmed — whether every other harness (Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity) has its own equivalent, and whether `omnigent setup` exposes one unified entry point for all of them or each must be set independently. This list is exactly what `iceagentkit compression on/off` needs to stay complete and correct — treat it as a living list, re-verified whenever Omnigent adds a harness.
 4. **Cost/token/compression-saving surfacing**: confirm what Omnigent's dispatch results (or Headroom's own stats endpoint) actually expose per-call, since `record_board_state`'s `cost_usd`/`tokens`/`compression_saved_tokens` fields depend on this being real, retrievable data.
 5. **Module contract (§11.1)**: this is a first draft, designed against polly-pipe as the only real example. It should be revisited once a second module is actually attempted — a one-module sample isn't enough to know which parts of the contract are genuinely general-purpose versus accidentally polly-pipe-shaped.
 6. **SQLite concurrent read/write behavior** (§11, §14): confirm `board.db` is opened in WAL mode so the TUI/web dashboard's read-only polling doesn't hit "database is locked" against `record_board_state`'s writes. This is standard SQLite practice for a single-writer/multi-reader setup, but needs to actually be set when the DB is created, not assumed.
 7. **Per-module compression control** (§11.2): today compression is platform-global only — confirmed no design exists for "on for this module, off for that one." Whether this is worth building depends on item 3 above: it's only possible at all if the per-harness/per-provider overrides turn out to be independently addressable per session, which isn't yet confirmed.
 8. **Graphify's git-hook refresh mechanism** (`graphify hook install/uninstall/status`): confirmed to exist (separate from the nudge hooks), but not yet verified in practice — whether post-commit/post-checkout rebuilds are fast enough to keep the graph usably fresh during an active session, and whether they fire correctly across the parallel git worktrees polly-pipe's implementors use (the staleness risk flagged when Graphify was first discussed).
 9. **RTK's Bash-only hook limitation on Claude Code** (§9.6): the native hook only rewrites `Bash` tool calls — `Read`/`Grep`/`Glob` bypass it. If polly-pipe wants RTK's savings to actually apply, the orchestrator's prompt needs an explicit instruction to prefer `rtk read`/`rtk grep`/`rtk find` over those built-ins for Claude Code implementors specifically — confirm this instruction is both necessary and sufficient (i.e. that sub-agents reliably follow it) before assuming RTK delivers its claimed reduction in practice.
+10. **Headroom's own config/runtime file location** (§11.3): confirmed for Omnigent (`~/.omnigent/chat.db`), RTK (`~/.config/rtk/config.toml`), and Graphify (per-repo `graph.json`) — not yet confirmed for Headroom itself. Needed before `iceagentkit setup` can correctly propagate `~/.iceagentkit/env` secrets into whatever Headroom actually reads, rather than assuming it only needs the proxy's own CLI flags.

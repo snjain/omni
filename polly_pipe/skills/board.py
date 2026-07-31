@@ -14,7 +14,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path.home() / ".icemetaagents" / "modules" / "polly-pipe" / "board.db"
+DB_PATH = Path.home() / ".iceagentkit" / "modules" / "polly-pipe" / "board.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (

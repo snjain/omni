@@ -1,0 +1,16 @@
+{
+  "_comment": "~/.iceagentkit/capabilities.json - what `iceagentkit compression/graphify/rtk status` reads directly, instead of re-probing each vendor tool's own state on every call. Written/updated by `iceagentkit setup` and by each capability's on/off command. See PRD §9.2, §9.5, §9.6, §11.3.",
+  "headroom": {
+    "installed": true,
+    "enabled": true,
+    "proxy_port": 8787
+  },
+  "graphify": {
+    "installed": true,
+    "enabled": false,
+    "note": "off here is a full `graphify uninstall` under the hood - no partial-disable state exists (PRD §9.5)"
+  },
+  "rtk": {
+    "installed": false
+  }
+}

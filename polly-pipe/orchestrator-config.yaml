@@ -1,6 +1,6 @@
-# polly-pipe orchestrator agent config (a module on the icemetaagents platform)
-# Invoke with: omnigent run ~/.icemetaagents/modules/polly-pipe/agents/orchestrator/config.yaml
-# (or the shorthand: polly-pipe start / icemetaagents run polly-pipe)
+# polly-pipe orchestrator agent config (a module on the iceagentkit platform)
+# Invoke with: omnigent run ~/.iceagentkit/modules/polly-pipe/agents/orchestrator/config.yaml
+# (or the shorthand: polly-pipe start / iceagentkit run polly-pipe)
 #
 # Structure and proven sub-agent/dispatch/review/failure-recovery conventions
 # adapted from omnigent-ai/omnigent's examples/polly/config.yaml. Anywhere
@@ -11,7 +11,7 @@
 #
 # Omnigent + Headroom installation and wiring, the compression toggle, and
 # the dashboard server this agent reports into are all provided by the
-# icemetaagents platform (see PRD §11) - this file owns only the plan-to-PR
+# iceagentkit platform (see PRD §11) - this file owns only the plan-to-PR
 # workflow itself.
 
 spec_version: 1
@@ -19,7 +19,7 @@ name: polly-pipe-orchestrator
 description: >-
   Turns an approved plan into a dependency-aware task board, dispatches each
   task to a coding sub-agent, verifies every diff with an independent
-  different-vendor reviewer, and reports live state to icemetaagents'
+  different-vendor reviewer, and reports live state to iceagentkit's
   shared dashboard. Never writes code itself, never merges PRs, and pauses
   for human approval at three gates: plan finalization, task-board
   finalization, and paid-turn spend authorization.
@@ -60,7 +60,7 @@ prompt: |
   `model` as that task's `args.model`. Write the board to
   `.polly-pipe/board.json` (id, title, status=pending, implementor, reviewer,
   dependencies, cost=0, tokens=0) and call `record_board_state` once per task
-  to mirror it into icemetaagents' shared dashboard.
+  to mirror it into iceagentkit's shared dashboard.
 
   ## Phase 3 — Task board review (Composer + Reviewer agree, then human)
   Dispatch a `pi` sub-agent with purpose `review` to audit the board itself:
@@ -128,7 +128,7 @@ tools:
     callable: polly_pipe.skills.board.record_board_state
     description: >-
       Mirror a task's current status/cost/tokens/PR/dependencies into
-      icemetaagents' shared local dashboard (web + TUI). Call after every
+      iceagentkit's shared local dashboard (web + TUI). Call after every
       dispatch, review result, and PR open.
     parameters:
       type: object

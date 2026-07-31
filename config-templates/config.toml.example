@@ -1,0 +1,18 @@
+# ~/.iceagentkit/config.toml
+# Platform settings only - NOT secrets. Secrets live in ~/.iceagentkit/env
+# (see env.example in this directory), which iceagentkit propagates into
+# each vendor tool's own expected mechanism. See PRD §11.3.
+
+[provider]
+default = "anthropic"          # which provider's models are used when a
+                                 # module doesn't pin one explicitly
+
+[spend]
+cap_per_task_board_usd = 50     # paid-turn gate default projection ceiling (PRD §5 Phase 4)
+concurrency_limit = 3           # feeds guardrails.policies.spawn_bounds.max_dispatches_per_turn
+                                 # for every installed module (PRD §11 diagram)
+
+[github]
+# token itself lives in `env` as GITHUB_TOKEN - this just records that PR
+# creation is expected to work, so `iceagentkit doctor` knows to check for it
+pr_creation_enabled = true

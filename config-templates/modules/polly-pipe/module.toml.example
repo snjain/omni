@@ -1,0 +1,12 @@
+# ~/.iceagentkit/modules/polly-pipe/module.toml
+# Records which optional capabilities THIS module opted into, per the
+# `iceagentkit module add polly-pipe` prompts in PRD §11.2/§13.1. Drives the
+# templating of the installed copy of orchestrator-config.yaml - whether the
+# `graph:` MCP tool entry and the RTK prompt instructions are included.
+
+source = "polly-pipe"             # pip package / git url this module came from
+version = "0.1.0"
+
+[capabilities]
+graphify = true                    # writes/keeps the `graph:` tool entry (PRD §9.5, §11.2)
+rtk = false                        # omits RTK's native hook install + prompt instructions (PRD §9.6)
