@@ -177,6 +177,19 @@ Confirmed directly in `omnigent-ai/omnigent`'s source (`docs/omni-upgrade-design
 - Optional, read-only correlation: a dashboard reader may separately open `~/.omnigent/chat.db` **read-only** to pull session/conversation metadata by `session_id`/`conversation_id` for display alongside a task — never as a write target.
 - A future module gets its own `~/.icemetaagents/modules/<name>/*.db`, namespaced the same way — no shared schema to coordinate across modules, and no shared server to keep running either.
 
+### 9.5 Graphify — verified facts (third-party, optional)
+
+Checked against `Graphify-Labs/graphify` on GitHub, not just its marketing page:
+
+- **What it is**: a local, deterministic AST-based (tree-sitter) code knowledge graph builder — no vector store, no cloud, no API keys, no LLM tokens spent building the graph. Apache 2.0, same licensing posture as Omnigent and Headroom.
+- **Distribution**: `uv tool install graphifyy` (note the double `y` — that's the actual package name), then `graphify install`.
+- **Compatibility**: ships a `/graphify` skill for Claude Code, Cursor, Codex, and Gemini CLI. Not Omnigent-specific — but works inside an Omnigent session anyway, because Omnigent's `claude-sdk` executor reads host skills from `~/.claude/skills/` (the same path Polly's own config warns against writing into), so it wraps the harness's native skill discovery rather than replacing it.
+- **Storage**: `graph.json` on disk (plus `graph.html` and `GRAPH_REPORT.md`), no database required for basic use; optional Neo4j/FalkorDB export.
+- **Three integration mechanisms**: (1) direct CLI (`graphify query/path/explain`), (2) an **MCP server** (`python -m graphify.serve graph.json`, exposing `query_graph`/`get_node`/`get_neighbors`/`shortest_path` — this is the mechanism a module's agent config declares as a `type: mcp` tool, §11.2), (3) "nudge" hooks that fire before file-read/search tool calls to steer an agent toward `graphify query` instead of grepping (Claude Code/Gemini CLI/CodeBuddy via PreToolUse-style hooks; Cursor/Codex via persistent instruction files like `.cursor/rules/graphify.mdc`).
+- **No published token-savings numbers.** The README's only cost claim is that graph *construction* costs 0 LLM credits (local parsing, no model calls) — it does not benchmark query-time token savings versus grep. The mechanism (returning a scoped subgraph instead of full file reads) is architecturally sound for reducing tokens spent on code-relationship questions, but treat any specific multiplier as unverified — including third-party claims (e.g. a community "71.5x fewer tokens" repo) that combine Graphify with unrelated tooling and aren't Graphify-Labs' own benchmark.
+- **Disabling has no partial state**: the nudge hooks (the only "always-on" piece) have no dedicated off switch — only full or per-platform `graphify uninstall`. The skill and MCP tool are already inherently opt-in (only used if invoked/declared), so nothing to disable there.
+- **Separate git-hook mechanism** (`graphify hook install/uninstall/status`, post-commit/post-checkout) exists to keep the graph in sync with code changes — distinct from the nudge hooks above, not yet verified for reliability under polly-pipe's parallel-worktree execution model (§16 item 8).
+
 ## 10. Omnigent Extensibility Model
 
 Checked directly against the `omnigent-ai/omnigent` codebase (not inferred): **there is no plugin, hook, extension, or middleware system** — searched the repo for all four terms, zero matches. The only two extension surfaces are:
@@ -286,7 +299,7 @@ All orchestration logic for the plan-to-PR workflow (plan, decompose, dispatch, 
 This is new, unspecified surface (§7 flags it as an open question) — captured here as a starting design, not a finished interface:
 
 **icemetaagents (platform) guarantees to every module:**
-- Omnigent and Headroom already installed and wired (§9.2) by the time a module runs.
+- Omnigent installed, and Headroom + Graphify installed and wired **if enabled** — both are optional at platform setup, not forced (§11.2).
 - A global compression toggle the module doesn't need to reimplement.
 - Isolated storage under `~/.icemetaagents/modules/<module-name>/` — no server required to use it; a module writes directly to its own SQLite file.
 
@@ -295,6 +308,30 @@ This is new, unspecified surface (§7 flags it as an open question) — captured
 - Any function-tool Python package it needs (e.g. polly-pipe's `record_board_state`), pip-installed into the same environment Omnigent's executor runs in.
 - Optionally, a view/schema registration for the shared dashboard (polly-pipe's is the task-board columns in §6) — a module that doesn't need a structured board can skip this and rely purely on the conversational session.
 - Its own CLI entrypoint if it wants one (polly-pipe ships `polly-pipe start`/`polly-pipe board`, both thin wrappers — see §13.2), independently pip-installable, so a module works standalone or via `icemetaagents run <module-name>`.
+- If it wants Graphify, an explicit opt-in — declaring the `graph: { type: mcp, ... }` tool entry in its own agent config (§11.2). Never assumed on just because the platform has it installed.
+
+### 11.2 Optional capabilities — Headroom and Graphify, at both the platform and module level
+
+Neither Headroom nor Graphify is mandatory for icemetaagents or for any module. Both are opt-in at two independent points, and the two capabilities land differently at the module level — worth being precise about the asymmetry rather than implying symmetric control that doesn't exist yet:
+
+| | Platform-level opt-in | Module-level opt-in |
+|---|---|---|
+| **Headroom (compression)** | `icemetaagents setup` asks whether to install/wire it at all; once wired, `icemetaagents compression on/off/status` toggles it (§9.2, §13.1) | **Not currently possible.** Compression is global across every module and plain `omnigent` usage alike — there is no per-module override today. Making it selective would need the per-harness/per-provider override granularity flagged as unverified in §16 item 3. Treat "compression on for polly-pipe but off for another module" as an unimplemented stretch goal, not a supported configuration. |
+| **Graphify (code graph)** | `icemetaagents setup` asks whether to install it (`graphify install`) | **Already naturally supported** — a module simply declares (or omits) the `graph: { type: mcp, url: ... }` tool entry in its own `orchestrator-config.yaml`. Graphify being installed platform-wide doesn't force any module to use it; each module's YAML is the real switch. |
+
+**Setup flow** (both prompted at `icemetaagents setup`, neither forced):
+```
+icemetaagents setup
+  ? Enable Headroom compression for all Omnigent traffic? [Y/n]
+  ? Install Graphify (local code knowledge graph)? [Y/n]
+```
+**Module registration flow** (Graphify only, since compression has no module-level knob yet):
+```
+icemetaagents module add polly-pipe
+  ? Graphify is installed on this platform. Use it for polly-pipe's
+    dependency analysis and explore/search dispatches? [Y/n]
+    (writes, or omits, the `graph:` tool entry in polly-pipe's orchestrator-config.yaml)
+```
 
 ## 12. Implementation Files (in this repo)
 
@@ -311,23 +348,34 @@ curl -fsSL https://icemetaagents.dev/install.sh | sh   # pip-installs headroom-a
                                                           # installs omnigent
 
 icemetaagents setup      # collects provider/GitHub keys, spend caps, concurrency limit;
-                           # starts Headroom proxy; wires Omnigent's base_url overrides
-                           # to it — no dashboard server to start, there isn't one (§11)
+                           # asks Y/n on Headroom compression and Graphify (§11.2) — both
+                           # optional, neither forced; if Headroom is enabled, starts its
+                           # proxy and wires Omnigent's base_url overrides to it — no
+                           # dashboard server to start, there isn't one (§11)
 
 icemetaagents doctor      # fires a dummy session through Omnigent and confirms Headroom's
                            # proxy actually saw and compressed the traffic — the built-in
                            # version of the §16 PoC, so it's checkable on every install
+                           # (skipped/no-op if compression wasn't enabled)
 
 icemetaagents compression on | off | status   # global switch, shared across every
-                                                # installed module — see §9.2
+                                                # installed module — see §9.2. Platform-level
+                                                # only; no per-module override exists (§11.2)
+
+icemetaagents graphify on | off | status   # installs/uninstalls Graphify platform-wide
+                                             # ("on"/"off" here really means graphify
+                                             # install / uninstall under the hood, since
+                                             # Graphify itself has no lighter toggle — §16)
 
 icemetaagents module add polly-pipe    # registers a module (installs its agent + skills,
-                                         # per the §11.1 contract)
+                                         # per the §11.1 contract); asks whether to wire
+                                         # in Graphify for this module specifically if it's
+                                         # installed platform-wide (§11.2)
 icemetaagents module list
 icemetaagents module remove polly-pipe
 ```
 
-**Deliberately a single global compression switch, not per-harness controls** — icemetaagents always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle.
+**Deliberately a single global compression switch, not per-harness controls** — icemetaagents always sets/unsets the full known override list together (§9.2), even though Omnigent's underlying mechanism is more granular. `status` exists specifically to catch the failure mode where a new harness's override isn't in the known list yet and gets missed by a toggle. **Graphify's switch is coarser still** — since the vendor tool has no partial-disable state, `icemetaagents graphify off` is a full `graphify uninstall` under the hood, not a paused/inactive state.
 
 ### 13.2 Module (polly-pipe)
 
@@ -366,3 +414,5 @@ Sourced by polly-pipe's orchestrator from each sub-agent dispatch's result and i
 4. **Cost/token/compression-saving surfacing**: confirm what Omnigent's dispatch results (or Headroom's own stats endpoint) actually expose per-call, since `record_board_state`'s `cost_usd`/`tokens`/`compression_saved_tokens` fields depend on this being real, retrievable data.
 5. **Module contract (§11.1)**: this is a first draft, designed against polly-pipe as the only real example. It should be revisited once a second module is actually attempted — a one-module sample isn't enough to know which parts of the contract are genuinely general-purpose versus accidentally polly-pipe-shaped.
 6. **SQLite concurrent read/write behavior** (§11, §14): confirm `board.db` is opened in WAL mode so the TUI/web dashboard's read-only polling doesn't hit "database is locked" against `record_board_state`'s writes. This is standard SQLite practice for a single-writer/multi-reader setup, but needs to actually be set when the DB is created, not assumed.
+7. **Per-module compression control** (§11.2): today compression is platform-global only — confirmed no design exists for "on for this module, off for that one." Whether this is worth building depends on item 3 above: it's only possible at all if the per-harness/per-provider overrides turn out to be independently addressable per session, which isn't yet confirmed.
+8. **Graphify's git-hook refresh mechanism** (`graphify hook install/uninstall/status`): confirmed to exist (separate from the nudge hooks), but not yet verified in practice — whether post-commit/post-checkout rebuilds are fast enough to keep the graph usably fresh during an active session, and whether they fire correctly across the parallel git worktrees polly-pipe's implementors use (the staleness risk flagged when Graphify was first discussed).
