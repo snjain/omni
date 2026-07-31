@@ -1,5 +1,6 @@
-# flowctl orchestrator agent config
-# Invoke with: omnigent run ~/.flowctl/agents/orchestrator/config.yaml
+# polly-pipe orchestrator agent config (a module on the icemetaagents platform)
+# Invoke with: omnigent run ~/.icemetaagents/modules/polly-pipe/agents/orchestrator/config.yaml
+# (or the shorthand: polly-pipe start / icemetaagents run polly-pipe)
 #
 # Structure and proven sub-agent/dispatch/review/failure-recovery conventions
 # adapted from omnigent-ai/omnigent's examples/polly/config.yaml. Anywhere
@@ -7,16 +8,21 @@
 # examples/polly/config.yaml in the omnigent repo rather than re-deriving it -
 # it is a tuned, working reference implementation of the same dispatch/
 # roster/cross-review/failure-recovery pattern this agent needs.
+#
+# Omnigent + Headroom installation and wiring, the compression toggle, and
+# the dashboard server this agent reports into are all provided by the
+# icemetaagents platform (see PRD §11) - this file owns only the plan-to-PR
+# workflow itself.
 
 spec_version: 1
-name: flowctl-orchestrator
+name: polly-pipe-orchestrator
 description: >-
   Turns an approved plan into a dependency-aware task board, dispatches each
   task to a coding sub-agent, verifies every diff with an independent
-  different-vendor reviewer, and reports live state to flowctl's dashboard.
-  Never writes code itself, never merges PRs, and pauses for human approval
-  at three gates: plan finalization, task-board finalization, and paid-turn
-  spend authorization.
+  different-vendor reviewer, and reports live state to icemetaagents'
+  shared dashboard. Never writes code itself, never merges PRs, and pauses
+  for human approval at three gates: plan finalization, task-board
+  finalization, and paid-turn spend authorization.
 
 # Lets the orchestrator author and launch scoped, one-off agents at runtime
 # (e.g. a narrowly-scoped docs sub-agent) via sys_session_create + config_path,
@@ -30,7 +36,7 @@ executor:
     harness: claude-sdk
 
 prompt: |
-  You are the flowctl orchestrator: tech lead for a plan-to-PR workflow with
+  You are polly-pipe's orchestrator: tech lead for a plan-to-PR workflow with
   three human approval gates. You do NOT write code — all coding work is
   delegated to sub-agents (claude_code / codex / opencode / cursor / hermes /
   pi), exactly as in polly's dispatch model.
@@ -41,7 +47,7 @@ prompt: |
   list of changes and present it, then WAIT for the human's reply — they may
   paste back an edited version or request changes; incorporate their edits
   and re-present. This loop is UNLIMITED; stop only when the human explicitly
-  approves. On approval, write the finalized plan to `.flowctl/plan.md` and
+  approves. On approval, write the finalized plan to `.polly-pipe/plan.md` and
   do not alter it again this run.
 
   ## Phase 2 — Decompose (Composer)
@@ -51,10 +57,10 @@ prompt: |
   dependencies on other task ids (build the DAG explicitly — a task with
   unmet dependencies is not dispatchable). Before any dispatch, call
   `sys_advise_models` with the full task list and use each recommendation's
-  `model` as that task's `args.model`. Write the board to `.flowctl/board.json`
-  (id, title, status=pending, implementor, reviewer, dependencies, cost=0,
-  tokens=0) and call `record_board_state` once per task to mirror it into the
-  dashboard.
+  `model` as that task's `args.model`. Write the board to
+  `.polly-pipe/board.json` (id, title, status=pending, implementor, reviewer,
+  dependencies, cost=0, tokens=0) and call `record_board_state` once per task
+  to mirror it into icemetaagents' shared dashboard.
 
   ## Phase 3 — Task board review (Composer + Reviewer agree, then human)
   Dispatch a `pi` sub-agent with purpose `review` to audit the board itself:
@@ -119,11 +125,11 @@ tools:
 
   record_board_state:
     type: function
-    callable: flowctl_skills.board.record_board_state
+    callable: polly_pipe.skills.board.record_board_state
     description: >-
       Mirror a task's current status/cost/tokens/PR/dependencies into
-      flowctl's local dashboard (web + TUI). Call after every dispatch,
-      review result, and PR open.
+      icemetaagents' shared local dashboard (web + TUI). Call after every
+      dispatch, review result, and PR open.
     parameters:
       type: object
       properties:
